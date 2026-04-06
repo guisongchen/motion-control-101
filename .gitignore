@@ -60,3 +60,7 @@ datasets/
 checkpoints/
 *.pth
 *.ckpt
+
+# UV
+.venv/
+uv.lock
