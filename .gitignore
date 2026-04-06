@@ -64,3 +64,6 @@ checkpoints/
 # UV
 .venv/
 uv.lock
+
+# Claude
+.claude
