@@ -47,13 +47,14 @@ HIP_TARGET = -0.1     # 髋固定目标
 KNEE_TARGET = 0.2     # 膝固定目标
 
 # 关节索引 (PyBullet humanoid.urdf)
+# 注意: 0-8 是躯干和手臂关节，9-14 是腿部关节
 JOINT_INDICES = {
-    "r_hip": 8,
-    "r_knee": 9,
-    "r_ankle": 10,
-    "l_hip": 14,
-    "l_knee": 15,
-    "l_ankle": 16,
+    "r_hip": 9,
+    "r_knee": 10,
+    "r_ankle": 11,
+    "l_hip": 12,
+    "l_knee": 13,
+    "l_ankle": 14,
 }
 
 
