@@ -17,8 +17,8 @@ import numpy as np
 # ==================== 配置参数 ====================
 
 # PD 控制器增益 (这是你要调节的核心参数)
-Kp = 50.0   # 比例增益: 角度误差越大，纠正力越大
-Kd = 10.0   # 微分增益: 角速度越大，阻尼力越大
+Kp = 150.0   # 比例增益: 角度误差越大，纠正力越大 (增大以提高响应)
+Kd = 30.0    # 微分增益: 角速度越大，阻尼力越大 (增大以减少振荡)
 
 # 仿真参数
 SIMULATION_STEPS = 5000   # 仿真步数
@@ -30,26 +30,31 @@ INITIAL_PUSH = 5.0        # 初始推一下摆杆 (N)
 
 # ==================== 工具函数 ====================
 
-def pd_controller(angle, angular_velocity):
+def pd_controller(angle, angular_velocity, cart_position=0, cart_velocity=0):
     """
-    PD 控制器 - 核心控制逻辑
+    PD 控制器 - 核心控制逻辑 (带可选位置控制)
 
     输入:
         angle: 摆杆角度 (rad), 0表示直立向上
         angular_velocity: 摆杆角速度 (rad/s)
+        cart_position: 小车位置 (可选)
+        cart_velocity: 小车速度 (可选)
 
     输出:
         force: 施加在小车上的水平力 (N)
-
-    原理:
-        误差 = 目标角度 - 当前角度 = 0 - angle = -angle
-        控制力 = Kp * 误差 + Kd * 误差变化率
-               = -Kp * angle - Kd * angular_velocity
     """
-    error = -angle              # 目标角度是0 (直立)
-    error_dot = -angular_velocity
+    # 角度控制项
+    error_angle = -angle
+    error_angle_dot = -angular_velocity
+    force_angle = Kp * error_angle + Kd * error_angle_dot
 
-    force = Kp * error + Kd * error_dot
+    # 可选: 位置控制 (防止小车跑太远)
+    Kp_pos = 0.5   # 位置增益
+    Kd_pos = 0.2   # 速度增益
+    force_position = Kp_pos * (-cart_position) + Kd_pos * (-cart_velocity)
+
+    # 总控制力
+    force = force_angle + force_position
 
     # 限制最大力 (防止数值不稳定)
     force = np.clip(force, -MAX_FORCE, MAX_FORCE)
@@ -59,16 +64,55 @@ def pd_controller(angle, angular_velocity):
 
 def get_cartpole_state(cartpole):
     """获取 Cart-Pole 的当前状态"""
-    # 获取关节状态 (摆杆)
-    joint_state = p.getJointState(cartpole, 0)
-    angle = joint_state[0]          # 摆杆角度
-    angular_velocity = joint_state[1]  # 摆杆角速度
+    # 关节 0: 滑动关节，控制 cart 水平移动
+    # 关节 1: 旋转关节，控制 pole 旋转
 
-    # 获取小车位置
-    base_pos, base_orn = p.getBasePositionAndOrientation(cartpole)
-    cart_position = base_pos[0]     # 小车 x 位置
+    # 获取小车位置 (滑动关节的位置)
+    cart_joint_state = p.getJointState(cartpole, 0)
+    cart_position = cart_joint_state[0]
+    cart_velocity = cart_joint_state[1]
 
-    return cart_position, angle, angular_velocity
+    # 获取摆杆角度 (旋转关节的位置)
+    pole_joint_state = p.getJointState(cartpole, 1)
+    angle = pole_joint_state[0]
+    angular_velocity = pole_joint_state[1]
+
+    return cart_position, angle, angular_velocity, cart_velocity
+
+
+def debug_urdf_structure(cartpole):
+    """打印 URDF 结构信息用于调试"""
+    print("\n[DEBUG] URDF 结构分析:")
+    print("-" * 60)
+
+    # Base 信息
+    base_pos = p.getBasePositionAndOrientation(cartpole)
+    print(f"Base 位置: {base_pos[0]}")
+
+    # 关节信息
+    num_joints = p.getNumJoints(cartpole)
+    print(f"关节数量: {num_joints}")
+
+    for i in range(num_joints):
+        joint_info = p.getJointInfo(cartpole, i)
+        link_name = joint_info[12].decode('utf-8')
+        joint_name = joint_info[1].decode('utf-8')
+        joint_type = joint_info[2]
+        print(f"  关节 {i}: Link='{link_name}', Joint='{joint_name}', Type={joint_type}")
+
+    # Link 信息
+    print("\nLink 状态:")
+    for i in range(num_joints):
+        link_state = p.getLinkState(cartpole, i)
+        print(f"  Link {i}: Pos={link_state[0]}")
+
+    # 关节状态
+    print("\n关节状态:")
+    for i in range(num_joints):
+        joint_state = p.getJointState(cartpole, i)
+        print(f"  关节 {i}: Pos={joint_state[0]:.4f}, Vel={joint_state[1]:.4f}")
+
+    print("-" * 60)
 
 
 def print_state(step, pos, angle, ang_vel, force):
@@ -79,6 +123,14 @@ def print_state(step, pos, angle, ang_vel, force):
               f"Angle: {angle_deg:+7.2f}° | "
               f"ω: {ang_vel:+.3f}rad/s | "
               f"Force: {force:+6.1f}N")
+
+def print_detailed_debug(step, pos, angle, ang_vel, force, cart_vel, prev_pos=None):
+    """详细调试信息，每10步打印一次"""
+    if step % 10 == 0:
+        angle_deg = np.degrees(angle)
+        pos_change = pos - prev_pos if prev_pos is not None else 0
+        print(f"[DEBUG] Step {step:4d} | Pos: {pos:+.4f}m | ΔPos: {pos_change:+.4f}m | "
+              f"Angle: {angle_deg:+7.2f}° | ω: {ang_vel:+.4f}rad/s | Cart_v: {cart_vel:+.4f}m/s | Force: {force:+6.1f}N")
 
 
 # ==================== 主程序 ====================
@@ -101,6 +153,15 @@ def main():
     # 设置仿真步长
     p.setTimeStep(1./240.)
 
+    # ---- 关键: 释放关节控制 ----
+    # 滑动关节默认有位置保持，需要先禁用才能自由移动
+    p.setJointMotorControl2(cartpole, 0, p.VELOCITY_CONTROL, targetVelocity=0, force=0)
+    # 摆杆关节也设为自由模式
+    p.setJointMotorControl2(cartpole, 1, p.VELOCITY_CONTROL, targetVelocity=0, force=0)
+
+    # ---- 调试: 打印 URDF 结构 ----
+    debug_urdf_structure(cartpole)
+
     # ---- 2. 初始扰动 (测试稳定性) ----
     print("=" * 60)
     print("Cart-Pole 平衡控制")
@@ -109,16 +170,22 @@ def main():
     print(f"初始扰动: 施加 {INITIAL_PUSH}N 的力")
     print("-" * 60)
 
-    # 给摆杆一个初始推力
-    p.applyExternalForce(cartpole, -1, [INITIAL_PUSH, 0, 0], [0, 0, 0], p.LINK_FRAME)
+    # 给摆杆一个初始角度扰动 (通过设置关节位置)
+    # 或者给一个初始速度
+    p.resetJointState(cartpole, 1, targetValue=0.1, targetVelocity=0)  # 给摆杆初始角度 ~5.7度
+    print(f"初始扰动: 设置摆杆初始角度 0.1 rad (~5.7°)")
 
     # ---- 3. 仿真循环 ----
     stable_steps = 0
     max_angle_deg = 0
+    prev_pos = None
+
+    print("\n[DEBUG] 开始仿真，监控小车位置变化...")
+    print("=" * 80)
 
     for step in range(SIMULATION_STEPS):
         # 获取当前状态
-        pos, angle, ang_vel = get_cartpole_state(cartpole)
+        pos, angle, ang_vel, cart_vel = get_cartpole_state(cartpole)
         angle_deg = abs(np.degrees(angle))
         max_angle_deg = max(max_angle_deg, angle_deg)
 
@@ -127,11 +194,15 @@ def main():
             stable_steps += 1
 
         # 计算控制输出 (核心!)
-        force = pd_controller(angle, ang_vel)
+        force = pd_controller(angle, ang_vel, pos, cart_vel)
 
-        # 施加力到小车
-        # 注意: cartpole.urdf 中小车是 base, 我们推动 base
-        p.applyExternalForce(cartpole, -1, [force, 0, 0], [0, 0, 0], p.LINK_FRAME)
+        # 通过关节电机控制小车运动 (滑动关节索引 0)
+        # 使用 TORQUE_CONTROL 或 VELOCITY_CONTROL
+        p.setJointMotorControl2(cartpole, 0, p.TORQUE_CONTROL, force=force)
+
+        # 详细调试输出
+        print_detailed_debug(step, pos, angle, ang_vel, force, cart_vel, prev_pos)
+        prev_pos = pos
 
         # 打印状态
         print_state(step, pos, angle, ang_vel, force)
