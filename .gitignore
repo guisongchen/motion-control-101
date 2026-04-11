@@ -67,3 +67,7 @@ uv.lock
 
 # Claude
 .claude
+
+output/
+
+dummy.md
