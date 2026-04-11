@@ -249,6 +249,96 @@ def simulate_trajectory(A, b, c, x0, U):
 
     return x, z
 
+def generate_swing_foot_trajectory(x_start, x_end, H, T_swing, dt):
+    """
+    Generate swing foot trajectory from x_start to x_end with height H over duration T_swing.
+
+    Uses a cycloidal trajectory in the horizontal plane and a cosine-based vertical trajectory.
+    """
+    t = np.arange(0, T_swing, dt)
+    N = len(t)
+    pos = np.zeros((3, N))
+    vel = np.zeros((3, N))
+
+    S = x_end - x_start
+
+    for i, ti in enumerate(t):
+        tau = ti / T_swing
+
+        # Horizontal cycloid trajectory
+        pos[0, i] = x_start[0] + S[0] * (tau - np.sin(2 * np.pi * tau) / (2 * np.pi))
+        pos[1, i] = x_start[1] + S[1] * (tau - np.sin(2 * np.pi * tau) / (2 * np.pi))
+
+        # Vertical trajectory: base linear interpolation + cycloidal lift
+        z_base = x_start[2] + (x_end[2] - x_start[2]) * tau
+        pos[2, i] = z_base + (H / 2) * (1 - np.cos(2 * np.pi * tau))
+
+        # Velocities
+        vel[0, i] = (S[0] / T_swing) * (1 - np.cos(2 * np.pi * tau))
+        vel[1, i] = (S[1] / T_swing) * (1 - np.cos(2 * np.pi * tau))
+        vel[2, i] = ((x_end[2] - x_start[2]) / T_swing) + (H * np.pi / T_swing) * np.sin(2 * np.pi * tau)
+
+    return t, pos, vel
+
+def generate_full_gait_trajectory(x, z, u, t, T_single, T_double, S, H, z_ground):
+    """
+    Generate full gait trajectory (CoM, left foot, right foot) from CoM and ZMP trajectories.
+    
+    """
+
+    left_pose = np.zeros((3, len(t)))
+    right_pose = np.zeros((3, len(t)))
+
+    full_cycle = 2 * (T_single + T_double)
+
+    for i, ti in enumerate(t):
+        n_cycle = int(ti // full_cycle)
+        ct = ti - n_cycle * full_cycle
+
+        lt = 2 * S * n_cycle
+        rt = S + 2 * S * n_cycle
+
+        left_pose[0, i] = lt
+        left_pose[1, i] = 0.0
+        left_pose[2, i] = z_ground
+
+        right_pose[0, i] = rt
+        right_pose[1, i] = 0.0
+        right_pose[2, i] = z_ground
+
+    T_total = t[-1]
+    dt = t[1] - t[0]
+    n_cycles = int(T_total // full_cycle) + 2
+    for n in range(n_cycles):
+        # Right foot swing (left single support)
+        t_start_right = n * full_cycle
+        if t_start_right >= T_total:
+            break
+        
+        idx_start = int(t_start_right / dt)
+        count = min(int(T_single / dt), len(t) - idx_start)
+        if count > 0:
+            rt_start = S + 2 * S * n
+            rt_start_3d = np.array([rt_start, 0.0, z_ground])
+            rt_end_3d = np.array([rt_start + 2 * S, 0.0, z_ground])
+            _, swing_pos, _ = generate_swing_foot_trajectory(rt_start_3d, rt_end_3d, H, T_single, dt)
+            right_pose[:, idx_start:idx_start + count] = swing_pos[:, :count]
+        # Left foot swing (right single support)
+        t_start_left = n * full_cycle + T_single + T_double
+        
+        if t_start_left >= T_total:            
+            break
+        
+        idx_start = int(t_start_left / dt)
+        count = min(int(T_single / dt), len(t) - idx_start)
+        if count > 0:
+            lt_start = 2 * S * n
+            lt_start_3d = np.array([lt_start, 0.0, z_ground])
+            lt_end_3d = np.array([lt_start + 2 * S, 0.0, z_ground])
+            _, swing_pos, _ = generate_swing_foot_trajectory(lt_start_3d, lt_end_3d, H, T_single, dt)
+            left_pose[:, idx_start:idx_start + count] = swing_pos[:, :count]
+    
+    return left_pose, right_pose
 
 def plot_results(t, z_ref, z, x, u):
     """Plot ZMP, CoM, velocity, acceleration, and jerk."""
@@ -287,6 +377,33 @@ def plot_results(t, z_ref, z, x, u):
 
     plt.tight_layout()
     plt.savefig('/home/ccc/projects/motion_control_101/homework/phase2/preview_control_openloop.png', dpi=150)
+    plt.close()
+
+
+def plot_full_gait(t, com_pos, z_ref, z_actual, left_pos, right_pos):
+    fig, axes = plt.subplots(2, 1, figsize=(12, 8))
+
+    axes[0].plot(t, z_ref, 'k--', label='ZMP ref', linewidth=1.5)
+    axes[0].plot(t, z_actual, 'r-', label='ZMP actual', linewidth=1.5)
+    axes[0].plot(t, com_pos, 'b-', label='CoM', linewidth=2.0)
+    axes[0].plot(t, left_pos[0, :], 'g-', label='Left foot x', linewidth=1.5)
+    axes[0].plot(t, right_pos[0, :], 'm-', label='Right foot x', linewidth=1.5)
+    axes[0].set_ylabel('X position (m)')
+    axes[0].set_title('Horizontal Gait Trajectories')
+    axes[0].legend()
+    axes[0].grid(True)
+
+    axes[1].plot(t, com_pos * 0 + 0.8, 'b--', label='CoM height (zc=0.8)', linewidth=1.0)
+    axes[1].plot(t, left_pos[2, :], 'g-', label='Left foot z', linewidth=1.5)
+    axes[1].plot(t, right_pos[2, :], 'm-', label='Right foot z', linewidth=1.5)
+    axes[1].set_ylabel('Z position (m)')
+    axes[1].set_xlabel('Time (s)')
+    axes[1].set_title('Vertical Foot Trajectories')
+    axes[1].legend()
+    axes[1].grid(True)
+
+    plt.tight_layout()
+    plt.savefig('/home/ccc/projects/motion_control_101/homework/phase2/full_gait_trajectory.png', dpi=150)
     plt.close()
 
 
@@ -339,8 +456,12 @@ def main():
     print(f"Max jerk: {max_jerk:.4f} m/s³")
 
     # --- Plot results ---
-    plot_results(t, z_ref, z, x, U)
+    # plot_results(t, z_ref, z, x, U)
 
+    # --- Plot full gait ---
+    left_pos, right_pos = generate_full_gait_trajectory(x, z, U, t, T_single, T_double, S, H=0.08, z_ground=0.0)
+    plot_full_gait(t, x[0, 1:], z_ref, z, left_pos, right_pos)
+    print("Full gait trajectory saved.")
 
 if __name__ == "__main__":
     main()
