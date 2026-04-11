@@ -1,0 +1,206 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy import linalg
+
+
+def build_cart_table_model(dt, z_c, g):
+    """Build Cart-Table model matrices."""
+    T = dt
+    A = np.array([
+        [1, T, T**2 / 2],
+        [0, 1, T],
+        [0, 0, 1]
+    ], dtype=float)
+    b = np.array([T**3 / 6, T**2 / 2, T], dtype=float).reshape(-1, 1)
+    c = np.array([1, 0, -z_c / g], dtype=float).reshape(-1, 1)
+    return A, b, c
+
+
+def generate_footsteps_zmp_ref(dt, T_total, T_single, T_double, S, init_left=0.0, init_right=0.2):
+    """
+    Generate ZMP reference trajectory for straight walking.
+
+    Pattern:
+      - left single support:  z = left_pos
+      - double support:       z linearly transitions left_pos -> right_pos
+      - right single support: z = right_pos
+      - double support:       z linearly transitions right_pos -> next_left_pos
+    """
+    t = np.arange(0, T_total, dt)
+    z_ref = np.zeros_like(t)
+
+    full_cycle = 2 * (T_single + T_double)  # 1.6 s for this test case
+
+    for i, ti in enumerate(t):
+        n_cycle = int(ti // full_cycle)
+        ct = ti - n_cycle * full_cycle
+
+        left_pos = init_left + 2 * S * n_cycle
+        right_pos = init_right + 2 * S * n_cycle
+        next_left = left_pos + 2 * S
+
+        if ct < T_single:
+            # left single support
+            z_ref[i] = left_pos
+        elif ct < T_single + T_double:
+            # double: left -> right
+            alpha = (ct - T_single) / T_double
+            z_ref[i] = left_pos + alpha * (right_pos - left_pos)
+        elif ct < T_single + T_double + T_single:
+            # right single support
+            z_ref[i] = right_pos
+        else:
+            # double: right -> next left
+            alpha = (ct - T_single - T_double - T_single) / T_double
+            z_ref[i] = right_pos + alpha * (next_left - right_pos)
+
+    return t, z_ref
+
+
+def build_batch_matrices(A, b, c, K):
+    """
+    Build batch matrices for open-loop preview control.
+
+    Given x_0, the ZMP sequence Z = [z_1, ..., z_K]^T can be written as:
+        Z = M_x0 @ x_0 + M_u @ U
+    where U = [u_0, ..., u_{K-1}]^T.
+    """
+    M_x0 = np.zeros((K, 3))
+    M_u = np.zeros((K, K))
+
+    for k in range(1, K + 1):
+        # c^T @ A^k
+        M_x0[k - 1, :] = (c.T @ np.linalg.matrix_power(A, k)).flatten()
+
+        for i in range(k):
+            # c^T @ A^{k-1-i} @ b
+            M_u[k - 1, i] = (c.T @ np.linalg.matrix_power(A, k - 1 - i) @ b).item()
+
+    return M_x0, M_u
+
+
+def solve_open_loop_preview(A, b, c, x0, z_ref, Q, R):
+    """
+    Solve open-loop preview control as a batch QP.
+
+    Minimizes:
+        J = sum_{k=1}^{K} Q*(z_ref_k - z_k)^2 + R*u_{k-1}^2
+    """
+    K = len(z_ref)
+    M_x0, M_u = build_batch_matrices(A, b, c, K)
+
+    # Stacked cost
+    # J = (z_ref - M_x0*x0 - M_u*u)^T * Q*I * (z_ref - M_x0*x0 - M_u*u) + u^T * R*I * u
+    # Optimal u: (M_u^T * Q * M_u + R*I) * u = M_u^T * Q * (z_ref - M_x0*x0)
+
+    Q_eye = Q * np.eye(K)
+    R_eye = R * np.eye(K)
+
+    H = M_u.T @ Q_eye @ M_u + R_eye
+    h = M_u.T @ Q_eye @ (z_ref - M_x0 @ x0)
+
+    U = linalg.solve(H, h, assume_a='pos')
+    return U
+
+
+def simulate_trajectory(A, b, c, x0, U):
+    """Roll out state and ZMP trajectory given control sequence U."""
+    K = len(U)
+    x = np.zeros((3, K + 1))
+    z = np.zeros(K)
+    x[:, 0] = x0
+
+    for k in range(K):
+        u_k = U[k]
+        x[:, k + 1] = A @ x[:, k] + b.flatten() * u_k
+        z[k] = (c.T @ x[:, k + 1]).item()
+
+    return x, z
+
+
+def plot_results(t, z_ref, z, x, u):
+    """Plot ZMP, CoM, velocity, acceleration, and jerk."""
+    fig, axes = plt.subplots(4, 1, figsize=(12, 10), sharex=True)
+
+    # 1. ZMP reference vs actual ZMP vs CoM position
+    axes[0].plot(t, z_ref, 'k--', label='ZMP ref')
+    axes[0].plot(t, z, 'r-', label='ZMP actual')
+    axes[0].plot(t, x[0, 1:], 'b-', label='CoM position')
+    axes[0].set_ylabel('Position (m)')
+    axes[0].set_title('ZMP Reference vs Actual vs CoM')
+    axes[0].legend()
+    axes[0].grid(True)
+
+    # 2. CoM velocity
+    axes[1].plot(t, x[1, 1:], 'g-', label='CoM velocity')
+    axes[1].set_ylabel('Velocity (m/s)')
+    axes[1].set_title('CoM Velocity')
+    axes[1].legend()
+    axes[1].grid(True)
+
+    # 3. CoM acceleration
+    axes[2].plot(t, x[2, 1:], 'm-', label='CoM acceleration')
+    axes[2].set_ylabel('Acceleration (m/s²)')
+    axes[2].set_title('CoM Acceleration')
+    axes[2].legend()
+    axes[2].grid(True)
+
+    # 4. Control input (jerk)
+    axes[3].plot(t, u, 'c-', label='Jerk')
+    axes[3].set_ylabel('Jerk (m/s³)')
+    axes[3].set_title('Control Input (Jerk)')
+    axes[3].set_xlabel('Time (s)')
+    axes[3].legend()
+    axes[3].grid(True)
+
+    plt.tight_layout()
+    plt.savefig('/home/ccc/projects/motion_control_101/homework/phase2/preview_control_openloop.png', dpi=150)
+    plt.close()
+
+
+def main():
+    # --- Robot parameters ---
+    g = 9.81
+    z_c = 0.8
+    dt = 0.01
+    Tc = np.sqrt(z_c / g)
+
+    # --- Footstep parameters ---
+    S = 0.2
+    T_single = 0.6
+    T_double = 0.2
+    T_step = T_single + T_double
+
+    # --- Preview control parameters ---
+    N = 160
+    Q = 1.0
+    R = 1e-6
+
+    # --- Initial state ---
+    x0 = np.array([0.0, 0.0, 0.0])
+
+    # --- Generate ZMP reference ---
+    # Simulate enough time to see periodic gait (e.g., 6 seconds)
+    T_total = 6.0
+    t, z_ref = generate_footsteps_zmp_ref(dt, T_total, T_single, T_double, S)
+
+    # --- Build model ---
+    A, b, c = build_cart_table_model(dt, z_c, g)
+
+    # --- Open-loop batch optimization over the entire horizon ---
+    U = solve_open_loop_preview(A, b, c, x0, z_ref, Q, R)
+    x, z = simulate_trajectory(A, b, c, x0, U)
+
+    # --- Numerical checks ---
+    rms_error = np.sqrt(np.mean((z - z_ref)**2))
+    max_jerk = np.max(np.abs(U))
+
+    print(f"ZMP tracking RMS error: {rms_error*1000:.3f} mm")
+    print(f"Max jerk: {max_jerk:.4f} m/s³")
+
+    # --- Plot results ---
+    plot_results(t, z_ref, z, x, U)
+
+
+if __name__ == "__main__":
+    main()
