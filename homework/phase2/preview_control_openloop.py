@@ -102,6 +102,138 @@ def solve_open_loop_preview(A, b, c, x0, z_ref, Q, R):
     U = linalg.solve(H, h, assume_a='pos')
     return U
 
+def batch_optimization_control(A, b, c, x0, z_ref, Q, R):
+    # --- Open-loop batch optimization over the entire horizon ---
+    U = solve_open_loop_preview(A, b, c, x0, z_ref, Q, R)
+    x, z = simulate_trajectory(A, b, c, x0, U)
+    return x, z, U
+
+def receding_horizon_control(A, b, c, x0, z_ref, Q, R, N):
+    # receding horizon control: solve a smaller batch problem at each time step, then apply the first control input
+    K = len(z_ref)  # horizon length = total steps
+    x = np.zeros((3, K + 1))
+    z = np.zeros(K)
+    u_applied = np.zeros(K)
+    x[:, 0] = x0
+
+    for k in range(K):
+        # Solve preview control for the remaining horizon
+        end = min(k + N, K)  # ensure we don't go beyond the reference length
+        z_preview = z_ref[end - min(N, K - k) : end]  # preview reference (up to N steps ahead)
+        
+        if len(z_preview) < N:
+            # Pad with the last reference if we have less than N steps left
+            z_preview = np.pad(z_preview, (0, N - len(z_preview)), 'edge')
+        
+        U = solve_open_loop_preview(A, b, c, x[:, k], z_preview, Q, R)
+
+        # Apply the first control input
+        u_k = U[0]
+        u_applied[k] = u_k
+
+        # Simulate one step
+        x[:, k + 1] = A @ x[:, k] + b.flatten() * u_k
+        z[k] = (c.T @ x[:, k + 1]).item()
+    return x, z, u_applied
+
+# def compute_preview_gains(A, b, c, Q, R, N):
+#     """
+#     Compute steady-state LQR gain K and preview gains f_j.
+
+#     Returns:
+#         K: steady-state feedback gain (1 x n)
+#         f: preview gains (N,)
+#     """
+#     n = A.shape[0]
+#     P = Q * (c @ c.T)
+
+#     # --- Backward Riccati iteration until convergence ---
+#     max_iter = 10000
+#     tol = 1e-12
+#     K = None
+#     for _ in range(max_iter):
+#         D = (R + b.T @ P @ b).item()
+#         K_new = (1.0 / D) * (b.T @ P @ A)
+#         P_new = Q * (c @ c.T) + A.T @ P @ A - D * (K_new.T @ K_new)
+
+#         diff = np.max(np.abs(P_new - P))
+#         K = K_new.flatten()
+#         P = P_new
+
+#         if diff < tol:
+#             break
+#     else:
+#         print(f"Warning: Riccati did not converge in {max_iter} iters， final max diff: {diff:.8f}")
+
+#     # --- Preview gains: f_j = Q * c.T @ (A - bK)^{j-1} @ b / D ---
+#     D = (R + b.T @ P @ b).item()
+#     A_cl = A - b @ K.reshape(1, -1)
+#     f = np.zeros(N)
+
+#     power = np.eye(n)
+#     for j in range(N):
+#         f[j] = (Q / D) * (c.T @ power @ b).item()
+#         power = A_cl @ power
+
+#     return K, f
+
+def compute_preview_gains(A, b, c, Q, R, N):
+    """
+    Compute steady-state LQR gain K and preview gains f_j using DARE.
+    """
+    n = A.shape[0]
+    Qeff = Q * (c @ c.T)
+
+    # --- Solve Discrete Algebraic Riccati Equation directly ---
+    P = linalg.solve_discrete_are(A, b, Qeff, R)
+
+    # --- Steady-state feedback gain ---
+    D = (R + b.T @ P @ b).item()
+    K = ((1.0 / D) * (b.T @ P @ A)).flatten()
+
+    # --- Preview gains ---
+    A_cl = A - b @ K.reshape(1, -1)
+    f = np.zeros(N)
+
+    power = np.eye(n)
+    for j in range(N):
+        f[j] = (Q / D) * (c.T @ power @ b).item()
+        power = A_cl @ power
+
+    return K, f
+
+
+def riccati_preview_control(A, b, c, x0, z_ref, Q, R, N):
+    """
+    Simulate using the classic preview control law:
+        uk = -K @ xk + sum{j=1}^{N} fj * zref{k+j}
+    """
+
+    K, f = compute_preview_gains(A, b, c, Q, R, N)
+
+    K = np.asarray(K).flatten()
+    N = len(f)
+    K_total = len(z_ref)
+
+    x = np.zeros((3, K_total + 1))
+    z = np.zeros(K_total)
+    u = np.zeros(K_total)
+    x[:, 0] = x0
+
+    for k in range(K_total):
+        end = min(k + N, K_total)
+        preview = z_ref[end - min(N, K_total - k): end]
+        if len(preview) < N:
+            preview = np.pad(preview, (0, N - len(preview)), mode='edge')
+
+        u_k = -K @ x[:, k] + f @ preview
+        u[k] = u_k
+        x[:, k + 1] = A @ x[:, k] + b.flatten() * u_k
+        z[k] = (c.T @ x[:, k + 1]).item()
+
+    return x, z, u
+
+
 
 def simulate_trajectory(A, b, c, x0, U):
     """Roll out state and ZMP trajectory given control sequence U."""
@@ -176,6 +308,8 @@ def main():
     Q = 1.0
     R = 1e-6
 
+    method = "riccati"  # "batch", "receding_horizon", or "riccati"
+
     # --- Initial state ---
     x0 = np.array([0.0, 0.0, 0.0])
 
@@ -187,9 +321,15 @@ def main():
     # --- Build model ---
     A, b, c = build_cart_table_model(dt, z_c, g)
 
-    # --- Open-loop batch optimization over the entire horizon ---
-    U = solve_open_loop_preview(A, b, c, x0, z_ref, Q, R)
-    x, z = simulate_trajectory(A, b, c, x0, U)
+    # --- Run preview control ---
+    if method == "batch":
+        x, z, U = batch_optimization_control(A, b, c, x0, z_ref, Q, R)
+    elif method == "receding_horizon":
+        x, z, U = receding_horizon_control(A, b, c, x0, z_ref, Q, R, N)
+    elif method == "riccati":
+        x, z, U = riccati_preview_control(A, b, c, x0, z_ref, Q, R, N)
+    else:
+        raise ValueError("Invalid method. Choose 'batch', 'receding_horizon', or 'riccati'.")
 
     # --- Numerical checks ---
     rms_error = np.sqrt(np.mean((z - z_ref)**2))
