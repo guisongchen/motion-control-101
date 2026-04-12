@@ -1,0 +1,244 @@
+<?xml version="1.0"?>
+<robot name="biped">
+  <!-- Pelvis (base link) -->
+  <link name="pelvis">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="20.0"/>
+      <inertia ixx="0.08333333333333336" ixy="0" ixz="0" iyy="0.05416666666666667" iyz="0" izz="0.10416666666666667"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.15 0.2 0.1"/>
+      </geometry>
+      <material name="blue">
+        <color rgba="0.2 0.4 0.8 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.15 0.2 0.1"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <!-- Left upper leg (hip roll to hip pitch dummy) -->
+  <link name="left_upper_leg">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="0.0001"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
+    </inertial>
+  </link>
+
+  <joint name="left_hip_roll" type="revolute">
+    <parent link="pelvis"/>
+    <child link="left_upper_leg"/>
+    <origin xyz="0 0.1 -0.05" rpy="0 0 0"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-0.8" upper="0.8" effort="100" velocity="10"/>
+  </joint>
+
+  <!-- Left Thigh -->
+  <link name="left_thigh">
+    <inertial>
+      <origin xyz="0 0 -0.185" rpy="0 0 0"/>
+      <mass value="5.0"/>
+      <inertia ixx="0.05854166666666666" ixy="0" ixz="0" iyy="0.05854166666666666" iyz="0" izz="0.0029999999999999996"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 -0.185" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.06 0.06 0.37"/>
+      </geometry>
+      <material name="grey">
+        <color rgba="0.6 0.6 0.6 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 -0.185" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.06 0.06 0.37"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="left_hip_pitch" type="revolute">
+    <parent link="left_upper_leg"/>
+    <child link="left_thigh"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-1.2" upper="1.2" effort="100" velocity="10"/>
+  </joint>
+
+  <!-- Left Shin -->
+  <link name="left_shin">
+    <inertial>
+      <origin xyz="0 0 -0.185" rpy="0 0 0"/>
+      <mass value="3.0"/>
+      <inertia ixx="0.03485" ixy="0" ixz="0" iyy="0.03485" iyz="0" izz="0.0012500000000000002"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 -0.185" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.05 0.05 0.37"/>
+      </geometry>
+      <material name="grey"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 -0.185" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.05 0.05 0.37"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="left_knee" type="revolute">
+    <parent link="left_thigh"/>
+    <child link="left_shin"/>
+    <origin xyz="0 0 -0.37" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-2.2" upper="0.1" effort="100" velocity="10"/>
+  </joint>
+
+  <!-- Left Foot -->
+  <link name="left_foot">
+    <inertial>
+      <origin xyz="0.03 0 -0.02" rpy="0 0 0"/>
+      <mass value="1.0"/>
+      <inertia ixx="0.0009666666666666669" ixy="0" ixz="0" iyy="0.003466666666666667" iyz="0" izz="0.0041666666666666675"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.03 0 -0.02" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.2 0.1 0.04"/>
+      </geometry>
+      <material name="green">
+        <color rgba="0.2 0.8 0.2 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0.03 0 -0.02" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.2 0.1 0.04"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="left_ankle" type="revolute">
+    <parent link="left_shin"/>
+    <child link="left_foot"/>
+    <origin xyz="0 0 -0.37" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-0.8" upper="0.8" effort="100" velocity="10"/>
+  </joint>
+
+  <!-- Right upper leg -->
+  <link name="right_upper_leg">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="0.0001"/>
+      <inertia ixx="1e-6" ixy="0" ixz="0" iyy="1e-6" iyz="0" izz="1e-6"/>
+    </inertial>
+  </link>
+
+  <joint name="right_hip_roll" type="revolute">
+    <parent link="pelvis"/>
+    <child link="right_upper_leg"/>
+    <origin xyz="0 -0.1 -0.05" rpy="0 0 0"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-0.8" upper="0.8" effort="100" velocity="10"/>
+  </joint>
+
+  <!-- Right Thigh -->
+  <link name="right_thigh">
+    <inertial>
+      <origin xyz="0 0 -0.185" rpy="0 0 0"/>
+      <mass value="5.0"/>
+      <inertia ixx="0.05854166666666666" ixy="0" ixz="0" iyy="0.05854166666666666" iyz="0" izz="0.0029999999999999996"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 -0.185" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.06 0.06 0.37"/>
+      </geometry>
+      <material name="grey"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 -0.185" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.06 0.06 0.37"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="right_hip_pitch" type="revolute">
+    <parent link="right_upper_leg"/>
+    <child link="right_thigh"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-1.2" upper="1.2" effort="100" velocity="10"/>
+  </joint>
+
+  <!-- Right Shin -->
+  <link name="right_shin">
+    <inertial>
+      <origin xyz="0 0 -0.185" rpy="0 0 0"/>
+      <mass value="3.0"/>
+      <inertia ixx="0.03485" ixy="0" ixz="0" iyy="0.03485" iyz="0" izz="0.0012500000000000002"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 -0.185" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.05 0.05 0.37"/>
+      </geometry>
+      <material name="grey"/>
+    </visual>
+    <collision>
+      <origin xyz="0 0 -0.185" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.05 0.05 0.37"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="right_knee" type="revolute">
+    <parent link="right_thigh"/>
+    <child link="right_shin"/>
+    <origin xyz="0 0 -0.37" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-2.2" upper="0.1" effort="100" velocity="10"/>
+  </joint>
+
+  <!-- Right Foot -->
+  <link name="right_foot">
+    <inertial>
+      <origin xyz="0.03 0 -0.02" rpy="0 0 0"/>
+      <mass value="1.0"/>
+      <inertia ixx="0.0009666666666666669" ixy="0" ixz="0" iyy="0.003466666666666667" iyz="0" izz="0.0041666666666666675"/>
+    </inertial>
+    <visual>
+      <origin xyz="0.03 0 -0.02" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.2 0.1 0.04"/>
+      </geometry>
+      <material name="green"/>
+    </visual>
+    <collision>
+      <origin xyz="0.03 0 -0.02" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.2 0.1 0.04"/>
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="right_ankle" type="revolute">
+    <parent link="right_shin"/>
+    <child link="right_foot"/>
+    <origin xyz="0 0 -0.37" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-0.8" upper="0.8" effort="100" velocity="10"/>
+  </joint>
+</robot>
