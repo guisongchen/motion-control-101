@@ -1,1 +1,0 @@
-/home/ccc/projects/knowledge_database/01_projects/robotics/motion_control_practice_guide.md
