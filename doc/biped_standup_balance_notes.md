@@ -2,6 +2,19 @@
 
 This note captures the main ideas behind the `biped_walker/sim_stand_balance.py` demo and the key discussion points around standing, balancing, and interpreting the result plot.
 
+## Workflow overview
+
+![PyBullet stand and balance workflow](./pybullet_stand_balance_workflow.svg)
+
+The workflow above shows the actual structure used in the demo:
+
+1. initialize the PyBullet world and load the URDF
+2. generate a desired pelvis trajectory from crouch to standing
+3. convert that pelvis target into leg joint targets
+4. apply `POSITION_CONTROL` each simulation step
+5. read body state and contact data to monitor balance
+6. stop on loss of balance or finish normally, then plot and summarize the run
+
 ## What the demo does
 
 The demo uses the simplified biped URDF in `biped_walker/biped.urdf` and simulates:

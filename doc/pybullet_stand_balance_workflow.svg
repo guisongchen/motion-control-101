@@ -1,0 +1,106 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="1120" viewBox="0 0 1280 1120" role="img" aria-labelledby="title desc">
+  <title id="title">PyBullet stand and balance workflow</title>
+  <desc id="desc">Workflow diagram for biped_walker/sim_stand_balance.py showing initialization, stand-up target generation, simulation stepping, state logging, balance checks, and result plotting.</desc>
+  <defs>
+    <style>
+      .bg { fill: #ffffff; }
+      .title { font: 700 30px Arial, sans-serif; fill: #111827; }
+      .subtitle { font: 400 16px Arial, sans-serif; fill: #4b5563; }
+      .box { fill: #f8fafc; stroke: #334155; stroke-width: 2; rx: 14; ry: 14; }
+      .phase { fill: #dbeafe; stroke: #1d4ed8; stroke-width: 2; rx: 16; ry: 16; }
+      .decision { fill: #fef3c7; stroke: #b45309; stroke-width: 2; }
+      .end { fill: #dcfce7; stroke: #15803d; stroke-width: 2; rx: 18; ry: 18; }
+      .text { font: 600 16px Arial, sans-serif; fill: #0f172a; }
+      .small { font: 400 14px Arial, sans-serif; fill: #334155; }
+      .arrow { stroke: #475569; stroke-width: 3; fill: none; marker-end: url(#arrowhead); }
+      .label { font: 700 14px Arial, sans-serif; fill: #92400e; }
+    </style>
+    <marker id="arrowhead" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <polygon points="0,0 10,5 0,10" fill="#475569" />
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1280" height="1120" />
+  <text class="title" x="640" y="52" text-anchor="middle">PyBullet Stand and Balance Workflow</text>
+  <text class="subtitle" x="640" y="80" text-anchor="middle">Based on biped_walker/sim_stand_balance.py</text>
+
+  <rect class="phase" x="420" y="110" width="440" height="72" />
+  <text class="text" x="640" y="142" text-anchor="middle">1. Start simulation</text>
+  <text class="small" x="640" y="164" text-anchor="middle">uv run python biped_walker/sim_stand_balance.py --gui</text>
+
+  <rect class="box" x="420" y="220" width="440" height="92" />
+  <text class="text" x="640" y="254" text-anchor="middle">2. Build and load world</text>
+  <text class="small" x="640" y="278" text-anchor="middle">ensure_biped_urdf(), p.connect(), set gravity and timestep,</text>
+  <text class="small" x="640" y="298" text-anchor="middle">load plane.urdf and biped.urdf</text>
+
+  <rect class="box" x="420" y="350" width="440" height="96" />
+  <text class="text" x="640" y="384" text-anchor="middle">3. Prepare robot model</text>
+  <text class="small" x="640" y="408" text-anchor="middle">find ankle joints, read joint limits, set foot / ground friction,</text>
+  <text class="small" x="640" y="428" text-anchor="middle">initialize crouched pose with resetJointState()</text>
+
+  <rect class="box" x="420" y="484" width="440" height="78" />
+  <text class="text" x="640" y="516" text-anchor="middle">4. Allocate logs</text>
+  <text class="small" x="640" y="540" text-anchor="middle">desired pelvis, actual pelvis, ZMP, tilt, ground reaction force</text>
+
+  <rect class="phase" x="420" y="600" width="440" height="72" />
+  <text class="text" x="640" y="632" text-anchor="middle">5. Enter per-step simulation loop</text>
+  <text class="small" x="640" y="654" text-anchor="middle">Run from settle phase → stand-up phase → balance hold phase</text>
+
+  <rect class="box" x="120" y="720" width="320" height="126" />
+  <text class="text" x="280" y="754" text-anchor="middle">A. Generate motion target</text>
+  <text class="small" x="280" y="778" text-anchor="middle">desired_pelvis_position(t)</text>
+  <text class="small" x="280" y="798" text-anchor="middle">- hold crouch</text>
+  <text class="small" x="280" y="818" text-anchor="middle">- smoothstep stand-up trajectory</text>
+  <text class="small" x="280" y="838" text-anchor="middle">- hold upright pelvis target</text>
+
+  <rect class="box" x="480" y="720" width="320" height="126" />
+  <text class="text" x="640" y="754" text-anchor="middle">B. Convert target to joint commands</text>
+  <text class="small" x="640" y="778" text-anchor="middle">solve_pitch_leg_angles()</text>
+  <text class="small" x="640" y="798" text-anchor="middle">build_joint_targets()</text>
+  <text class="small" x="640" y="818" text-anchor="middle">clamp each joint to URDF limits</text>
+
+  <rect class="box" x="840" y="720" width="320" height="126" />
+  <text class="text" x="1000" y="754" text-anchor="middle">C. Apply control and step physics</text>
+  <text class="small" x="1000" y="778" text-anchor="middle">apply_joint_targets()</text>
+  <text class="small" x="1000" y="798" text-anchor="middle">p.setJointMotorControl2(... POSITION_CONTROL ...)</text>
+  <text class="small" x="1000" y="818" text-anchor="middle">p.stepSimulation()</text>
+
+  <rect class="box" x="240" y="900" width="360" height="110" />
+  <text class="text" x="420" y="934" text-anchor="middle">D. Measure balance state</text>
+  <text class="small" x="420" y="958" text-anchor="middle">get base pose, convert quaternion to roll / pitch,</text>
+  <text class="small" x="420" y="978" text-anchor="middle">compute ZMP from contact points and normal forces</text>
+  <text class="small" x="420" y="998" text-anchor="middle">store logs for plotting and summary</text>
+
+  <polygon class="decision" points="860,900 1020,980 860,1060 700,980" />
+  <text class="text" x="860" y="958" text-anchor="middle">E. Balance lost?</text>
+  <text class="small" x="860" y="982" text-anchor="middle">base height &lt; 0.35 m</text>
+
+  <rect class="end" x="1040" y="930" width="180" height="96" />
+  <text class="text" x="1130" y="964" text-anchor="middle">6. Finish</text>
+  <text class="small" x="1130" y="988" text-anchor="middle">plot_results()</text>
+  <text class="small" x="1130" y="1008" text-anchor="middle">print summary</text>
+
+  <line class="arrow" x1="640" y1="182" x2="640" y2="220" />
+  <line class="arrow" x1="640" y1="312" x2="640" y2="350" />
+  <line class="arrow" x1="640" y1="446" x2="640" y2="484" />
+  <line class="arrow" x1="640" y1="562" x2="640" y2="600" />
+
+  <line class="arrow" x1="640" y1="672" x2="280" y2="720" />
+  <line class="arrow" x1="440" y1="783" x2="480" y2="783" />
+  <line class="arrow" x1="800" y1="783" x2="840" y2="783" />
+  <line class="arrow" x1="1000" y1="846" x2="1000" y2="880" />
+  <line class="arrow" x1="1000" y1="880" x2="520" y2="880" />
+  <line class="arrow" x1="520" y1="880" x2="520" y2="900" />
+  <line class="arrow" x1="600" y1="955" x2="700" y2="980" />
+
+  <line class="arrow" x1="860" y1="900" x2="640" y2="672" />
+  <text class="label" x="742" y="800" text-anchor="middle">No → next timestep</text>
+
+  <line class="arrow" x1="1020" y1="980" x2="1040" y2="980" />
+  <text class="label" x="1030" y="964" text-anchor="middle">Yes</text>
+
+  <line class="arrow" x1="860" y1="1060" x2="860" y2="1088" />
+  <line class="arrow" x1="860" y1="1088" x2="1130" y2="1088" />
+  <line class="arrow" x1="1130" y1="1088" x2="1130" y2="1026" />
+  <text class="label" x="980" y="1078" text-anchor="middle">Loop ended normally</text>
+</svg>
