@@ -178,7 +178,7 @@ def main():
             p.resetJointState(robot_id, i, joint_angles[i])
 
         p.stepSimulation()
-        time.sleep(0.01)  # Slow down to real time if using GUI
+        # time.sleep(0.01)  # Slow down to real time if using GUI
 
         # Record actual CoM (base position)
         pos, _ = p.getBasePositionAndOrientation(robot_id)
@@ -201,33 +201,44 @@ def main():
     # Sagittal X
     ax = axes[0, 0]
     ax.plot(t_axis, com_ref[:, 0], label="CoM ref X")
-    ax.plot(t_axis, com_actual[:, 0], ls="--", label="CoM actual X")
+    ax.plot(t_axis, com_actual[:, 0], ls="--", lw=1.5, alpha=0.7, label="CoM actual X")
     ax.plot(t_axis, zmp_ref[:, 0], label="ZMP ref X")
-    ax.plot(t_axis, zmp_actual[:, 0], ls="--", label="ZMP actual X")
+    ax.plot(t_axis, zmp_actual[:, 0], ls="--", lw=1.5, alpha=0.7, label="ZMP actual X")
     ax.set_xlabel("Time [s]")
     ax.set_ylabel("X [m]")
     ax.legend()
     ax.set_title("Sagittal Trajectory")
     ax.grid(True)
 
-    # Lateral Y
-    ax = axes[0, 1]
-    ax.plot(t_axis, com_ref[:, 1], label="CoM ref Y")
-    ax.plot(t_axis, com_actual[:, 1], ls="--", label="CoM actual Y")
-    ax.plot(t_axis, zmp_ref[:, 1], label="ZMP ref Y")
-    ax.plot(t_axis, zmp_actual[:, 1], ls="--", label="ZMP actual Y")
-    ax.set_xlabel("Time [s]")
-    ax.set_ylabel("Y [m]")
-    ax.legend()
-    ax.set_title("Lateral Trajectory")
-    ax.grid(True)
+    # Lateral Y – use twin axes so CoM and ZMP are both visible
+    ax_com = axes[0, 1]
+    ax_zmp = ax_com.twinx()
+    ax_com.plot(t_axis, com_ref[:, 1], color="tab:blue", label="CoM ref Y")
+    ax_com.plot(t_axis, com_actual[:, 1], ls="--", lw=1.5, alpha=0.7, color="tab:cyan", label="CoM actual Y")
+    ax_zmp.plot(t_axis, zmp_ref[:, 1], color="tab:green", label="ZMP ref Y")
+    ax_zmp.plot(t_axis, zmp_actual[:, 1], ls="--", lw=1.5, alpha=0.7, color="tab:olive", label="ZMP actual Y")
+    ax_com.set_xlabel("Time [s]")
+    ax_com.set_ylabel("CoM Y [m]", color="tab:blue")
+    ax_zmp.set_ylabel("ZMP Y [m]", color="tab:green")
+    ax_com.tick_params(axis="y", labelcolor="tab:blue")
+    ax_zmp.tick_params(axis="y", labelcolor="tab:green")
+    # Combine legends from both axes
+    lines, labels = ax_com.get_legend_handles_labels()
+    lines2, labels2 = ax_zmp.get_legend_handles_labels()
+    ax_com.legend(lines + lines2, labels + labels2, loc="upper right")
+    ax_com.set_title("Lateral Trajectory")
+    ax_com.grid(True)
 
     # Side view (X-Z)
     ax = axes[1, 0]
     ax.plot(com_ref[:, 0], com_ref[:, 2], label="CoM ref")
-    ax.plot(com_actual[:, 0], com_actual[:, 2], ls="--", label="CoM actual")
-    ax.plot(left_foot_ref[:, 0], left_foot_ref[:, 2], label="Left foot")
-    ax.plot(right_foot_ref[:, 0], right_foot_ref[:, 2], label="Right foot")
+    ax.plot(com_actual[:, 0], com_actual[:, 2], ls="--", lw=1.5, alpha=0.7, label="CoM actual")
+    # Because left/right feet trace the same cycloid path in X-Z, use markers to
+    # distinguish them even when the line paths overlap.
+    ax.plot(left_foot_ref[:, 0], left_foot_ref[:, 2], ls="-", marker="o", markevery=60,
+            markersize=4, alpha=0.7, label="Left foot")
+    ax.plot(right_foot_ref[:, 0], right_foot_ref[:, 2], ls="--", marker="s", markevery=60,
+            markersize=4, alpha=0.7, label="Right foot")
     ax.set_xlabel("X [m]")
     ax.set_ylabel("Z [m]")
     ax.legend()
@@ -238,20 +249,26 @@ def main():
     ax = axes[1, 1]
     ax.plot(com_ref[:, 0], com_ref[:, 1], label="CoM ref")
     ax.plot(zmp_ref[:, 0], zmp_ref[:, 1], label="ZMP ref")
-    # Draw support-foot rectangles
+    # Draw support-foot rectangles (label only the first of each color)
     half_l = 0.05
     half_w = 0.04
+    left_label_done = False
+    right_label_done = False
     for seg in traj["foot_refs"]:
         if seg["support"] == "left":
             fx, fy = seg["left"]
             rect_x = [fx - half_l, fx + half_l, fx + half_l, fx - half_l, fx - half_l]
             rect_y = [fy - half_w, fy - half_w, fy + half_w, fy + half_w, fy - half_w]
-            ax.plot(rect_x, rect_y, "g-", lw=0.8, alpha=0.5)
+            ax.plot(rect_x, rect_y, "g-", lw=0.8, alpha=0.5,
+                    label="Left support" if not left_label_done else "")
+            left_label_done = True
         elif seg["support"] == "right":
             fx, fy = seg["right"]
             rect_x = [fx - half_l, fx + half_l, fx + half_l, fx - half_l, fx - half_l]
             rect_y = [fy - half_w, fy - half_w, fy + half_w, fy + half_w, fy - half_w]
-            ax.plot(rect_x, rect_y, "r-", lw=0.8, alpha=0.5)
+            ax.plot(rect_x, rect_y, "r-", lw=0.8, alpha=0.5,
+                    label="Right support" if not right_label_done else "")
+            right_label_done = True
     ax.set_xlabel("X [m]")
     ax.set_ylabel("Y [m]")
     ax.legend()
