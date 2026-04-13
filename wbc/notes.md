@@ -540,3 +540,333 @@ $$
 阻尼最小二乘 = 在标准伪逆解的基础上，给关节速度加一个 $\ell_2$ 正则项，使得在奇异点附近解不会爆炸，代价是在该方向上跟踪精度略有下降。
 
 没问题的话，下一步可以进入练习 1的三连杆臂代码实现，或者继续练习 3的 QP-WBC。你想先跑哪个？
+
+---
+
+好问题，这触及速度级控制的一个核心细节。
+
+因为肘关节的期望角度是常数，它的“参考速度”就是 0。
+
+———
+解释
+
+速度级 IK 的一般形式是：
+
+$$
+\dot{\mathbf{x}}^* = \underbrace{\dot{\mathbf{x}}{\text{des}}}{\text{参考速度}} + \underbrace{K_p (\mathbf{x}{\text{des}} - \mathbf{x}{\text{actual}})}_{\text{反馈修正}}
+$$
+
+这个式子对任何任务变量都成立，无论是末端位置还是关节角度。
+
+主任务：末端跟踪圆形轨迹
+圆的期望位置 $\mathbf{x}_{\text{des}}(t)$ 随时间变化，所以它有非零的参考速度：
+$$
+\dot{\mathbf{x}}_{\text{des}}(t) = \begin{bmatrix} -0.5\omega \sin(\omega t) \\ 0.5\omega \cos(\omega t) \end{bmatrix}
+$$
+因此完整指令是：
+$$
+\dot{\mathbf{x}}^* = \dot{\mathbf{x}}{\text{des}}(t) + K_p (\mathbf{x}{\text{des}} - \mathbf{x}_{\text{actual}})
+$$
+
+次任务：肘关节角度保持
+设定 $\theta_{2,\text{des}} = 0.5$（常数），它不随时间变化：
+$$
+\dot{\theta}_{2,\text{des}} = \frac{d}{dt}(0.5) = 0
+$$
+所以完整指令其实是：
+$$
+\dot{\theta}2^* = \underbrace{0}{\text{参考速度}} + K_{\text{sec}} (\theta_{2,\text{des}} - \theta_{2,\text{actual}}) = K_{\text{sec}} (\theta_{2,\text{des}} - \theta_{2,\text{actual}})
+$$
+
+———
+推广：如果肘关节也在跟踪一个时变轨迹呢？
+
+比如你想让肘关节按正弦摆动：$\theta_{2,\text{des}}(t) = 0.5 + 0.2\sin(2t)$，那它的指令就必须包含参考速度项：
+
+$$
+\dot{\theta}2^* = \underbrace{0.4\cos(2t)}{\text{参考速度}} + K_{\text{sec}} \left[ \left(0.5 + 0.2\sin(2t)\right) - \theta_{2,\text{actual}} \right]
+$$
+
+———
+一句话总结
+
+常值调节问题中没有参考速度项，是因为参考速度本身就为 0，不是被省略了。 如果次任务也是一个时变的轨迹跟踪，同样需要加上对应的期望速度项。
+
+---
+
+从正运动学出发，推导速度映射和雅可比的过程非常直接：对时间求导 + 多元链式法则。
+
+———
+1. 抽象形式的推导
+
+正运动学
+末端位置是关节角的函数：
+$$
+\mathbf{x} = f(\mathbf{q})
+$$
+其中 $\mathbf{x} \in \mathbb{R}^m$，$\mathbf{q} \in \mathbb{R}^n$。
+
+对时间求导
+两边对时间 $t$ 求导：
+$$
+\frac{d\mathbf{x}}{dt} = \frac{\partial f}{\partial \mathbf{q}} \cdot \frac{d\mathbf{q}}{dt}
+$$
+
+定义速度和雅可比
+• 末端速度：$\dot{\mathbf{x}} = \frac{d\mathbf{x}}{dt}$
+• 关节速度：$\dot{\mathbf{q}} = \frac{d\mathbf{q}}{dt}$
+• 雅可比矩阵：$\mathbf{J}(\mathbf{q}) = \frac{\partial f}{\partial \mathbf{q}} \in \mathbb{R}^{m \times n}$
+
+于是得到核心关系：
+$$
+\boxed{ \dot{\mathbf{x}} = \mathbf{J}(\mathbf{q}) \, \dot{\mathbf{q}} }
+$$
+
+这就是速度级正运动学。雅可比的第 $i$ 列，就是第 $i$ 个关节以单位速度转动时，末端产生的线速度。
+
+———
+2. 以 2D 三连杆臂为例的具体推导
+
+正运动学
+$$
+\begin{aligned}
+x_e &= l_1 c_1 + l_2 c_{12} + l_3 c_{123} \\
+y_e &= l_1 s_1 + l_2 s_{12} + l_3 s_{123}
+\end{aligned}
+$$
+其中：
+• $c_1 = \cos\theta_1$, $s_1 = \sin\theta_1$
+• $c_{12} = \cos(\theta_1+\theta_2)$, $s_{12} = \sin(\theta_1+\theta_2)$
+• $c_{123} = \cos(\theta_1+\theta_2+\theta_3)$, $s_{123} = \sin(\theta_1+\theta_2+\theta_3)$
+
+计算 $\frac{\partial x_e}{\partial \theta_1}$
+
+以 $x_e$ 对 $\theta_1$ 的偏导为例：
+$$
+\frac{\partial x_e}{\partial \theta_1} = -l_1 s_1 - l_2 s_{12} - l_3 s_{123}
+$$
+
+为什么？因为 $\theta_1$ 出现在所有三项中：
+• $\frac{\partial}{\partial \theta_1}(l_1 c_1) = -l_1 s_1$
+• $\frac{\partial}{\partial \theta_1}(l_2 c_{12}) = -l_2 s_{12} \cdot \frac{\partial(\theta_1+\theta_2)}{\partial \theta_1} = -l_2 s_{12}$
+• $\frac{\partial}{\partial \theta_1}(l_3 c_{123}) = -l_3 s_{123} \cdot \frac{\partial(\theta_1+\theta_2+\theta_3)}{\partial \theta_1} = -l_3 s_{123}$
+
+计算 $\frac{\partial x_e}{\partial \theta_2}$
+
+$\theta_2$ 只出现在第二项和第三项：
+$$
+\frac{\partial x_e}{\partial \theta_2} = -l_2 s_{12} - l_3 s_{123}
+$$
+
+计算 $\frac{\partial x_e}{\partial \theta_3}$
+
+$\theta_3$ 只出现在第三项：
+$$
+\frac{\partial x_e}{\partial \theta_3} = -l_3 s_{123}
+$$
+
+对 $y_e$ 同理
+$$
+\begin{aligned}
+\frac{\partial y_e}{\partial \theta_1} &= l_1 c_1 + l_2 c_{12} + l_3 c_{123} \\
+\frac{\partial y_e}{\partial \theta_2} &= l_2 c_{12} + l_3 c_{123} \\
+\frac{\partial y_e}{\partial \theta_3} &= l_3 c_{123}
+\end{aligned}
+$$
+
+组装雅可比矩阵
+$$
+\mathbf{J}_{\text{ee}} = \begin{bmatrix}
+-l_1 s_1 - l_2 s_{12} - l_3 s_{123} & -l_2 s_{12} - l_3 s_{123} & -l_3 s_{123} \\
+l_1 c_1 + l_2 c_{12} + l_3 c_{123} & l_2 c_{12} + l_3 c_{123} & l_3 c_{123}
+\end{bmatrix}
+$$
+
+———
+3. 几何直觉：雅可比列的物理意义
+
+雅可比的每一列 $\mathbf{J}_i = \frac{\partial \mathbf{x}}{\partial \theta_i}$ 表示：仅让第 $i$ 个关节以单位角速度转动时，末端获得的速度。
+
+对于平面旋转关节，这个速度的大小等于该关节到末端的距离，方向垂直于该连杆。
+
+以第 2 列为例：
+$$
+\mathbf{J}2 = \begin{bmatrix} -l_2 s{12} - l_3 s_{123} \\ l_2 c_{12} + l_3 c_{123} \end{bmatrix}
+$$
+
+这正是从关节 2 到末端的位置向量旋转 90° 后的方向，长度为 $|l_2 + l_3|$ 在该平面上的投影。换句话说，转动 $\theta_2$ 时，连杆 2 和连杆 3 会一起转动，所以末端速度由这两段连杆共同贡献。
+
+———
+4. 速度映射的完整表达式
+
+将雅可比代入 $\dot{\mathbf{x}} = \mathbf{J} \dot{\mathbf{q}}$，得到：
+$$
+\begin{bmatrix} \dot{x}_e \\ \dot{y}_e \end{bmatrix} = \begin{bmatrix}
+-l_1 s_1 - l_2 s_{12} - l_3 s_{123} & -l_2 s_{12} - l_3 s_{123} & -l_3 s_{123} \\
+l_1 c_1 + l_2 c_{12} + l_3 c_{123} & l_2 c_{12} + l_3 c_{123} & l_3 c_{123}
+\end{bmatrix} \begin{bmatrix} \dot{\theta}_1 \\ \dot{\theta}_2 \\ \dot{\theta}_3 \end{bmatrix}
+$$
+
+展开第一行：
+$$
+\dot{x}e = (-l_1 s_1 - l_2 s{12} - l_3 s_{123})\dot{\theta}1 + (-l_2 s{12} - l_3 s_{123})\dot{\theta}2 + (-l_3 s{123})\dot{\theta}_3
+$$
+
+验证：当只有 $\theta_1$ 转动时（$\dot{\theta}_2 = \dot{\theta}_3 = 0$），
+$$
+\dot{x}e = (-l_1 s_1 - l_2 s{12} - l_3 s_{123})\dot{\theta}_1
+$$
+这与直接对 $x_e = l_1 c_1 + l_2 c_{12} + l_3 c_{123}$ 求时间导数（仅 $\theta_1$ 变）完全一致。
+
+———
+一句话总结
+
+雅可比矩阵就是正运动学函数 $f(\mathbf{q})$ 对 $\mathbf{q}$ 的全导数。 求导规则没有任何特殊之处：对每个关节角用链式法则求偏导，然后把结果按列组装成矩阵。$\dot{\mathbf{x}} = \mathbf{J}\dot{\mathbf{q}}$ 本质上就是多元函数求导的链式法则。
+
+如果你卡在了代码实现里某一步的偏导计算，把具体项发给我，我可以帮你逐个核对。
+
+---
+
+零空间投影矩阵的推导
+
+我们从定义出发，一步步证明为什么零空间投影矩阵是 $\mathbf{N} = \mathbf{I} - \mathbf{J}^\dagger \mathbf{J}$。
+
+———
+1. 零空间的定义
+
+给定任务雅可比 $\mathbf{J} \in \mathbb{R}^{m \times n}$（$m < n$，行满秩），零空间是所有不改变任务输出的关节速度的集合：
+
+$$
+\mathcal{N}(\mathbf{J}) = \{ \dot{\mathbf{q}} \in \mathbb{R}^n \mid \mathbf{J} \dot{\mathbf{q}} = \mathbf{0} \}
+$$
+
+维度：$\dim \mathcal{N}(\mathbf{J}) = n - m$。
+
+我们的目标是找到一个矩阵 $\mathbf{N}$，使得对任意向量 $\mathbf{z}$，$\mathbf{N}\mathbf{z}$ 都落在 $\mathcal{N}(\mathbf{J})$ 里，而且如果 $\mathbf{z}$ 本身已经在 $\mathcal{N}(\mathbf{J})$ 里，那么 $\mathbf{N}\mathbf{z} = \mathbf{z}$。
+
+———
+2. 先理解 $\mathbf{J}^\dagger \mathbf{J}$ 投影到哪里
+
+对于行满秩的 $\mathbf{J}$，右伪逆为：
+$$
+\mathbf{J}^\dagger = \mathbf{J}^\top (\mathbf{J}\mathbf{J}^\top)^{-1}
+$$
+
+有两个关键的恒等式：
+
+（a） $\mathbf{J} \mathbf{J}^\dagger = \mathbf{I}_m$  
+这说明 $\mathbf{J}^\dagger$ 把任务空间的速度映射回关节空间，而 $\mathbf{J}$ 再把它变回去时保持原样。
+
+（b） $\mathbf{P} = \mathbf{J}^\dagger \mathbf{J} \in \mathbb{R}^{n \times n}$
+
+这个矩阵有什么性质？
+
+• 幂等性：
+  $$
+  \mathbf{P}^2 = (\mathbf{J}^\dagger \mathbf{J})(\mathbf{J}^\dagger \mathbf{J}) = \mathbf{J}^\dagger (\mathbf{J}\mathbf{J}^\dagger) \mathbf{J} = \mathbf{J}^\dagger \mathbf{I}_m \mathbf{J} = \mathbf{J}^\dagger \mathbf{J} = \mathbf{P}
+  $$
+  满足投影矩阵的定义。
+
+• 对称性：
+  $$
+  \mathbf{P}^\top = (\mathbf{J}^\dagger \mathbf{J})^\top = \mathbf{J}^\top (\mathbf{J}^\dagger)^\top = \mathbf{J}^\top [(\mathbf{J}^\top)(\mathbf{J}\mathbf{J}^\top)^{-1}]^\top = \mathbf{J}^\top (\mathbf{J}\mathbf{J}^\top)^{-1} \mathbf{J} = \mathbf{J}^\dagger \mathbf{J} = \mathbf{P}
+  $$
+
+所以 $\mathbf{P} = \mathbf{J}^\dagger \mathbf{J}$ 是一个正交投影矩阵。它投影到哪个子空间？
+
+$\mathbf{P}$ 的列空间（range space）就是 $\mathbf{J}^\top$ 的列空间，也就是 $\mathbf{J}$ 的行空间。换句话说：
+$\mathbf{P}$ 把任意关节速度投影到能影响任务输出的那个方向上。
+
+———
+3. 零空间投影矩阵的构造
+
+既然 $\mathbb{R}^n$ 可以正交分解为：
+$$
+\mathbb{R}^n = \underbrace{\mathcal{R}(\mathbf{J}^\top)}{\text{行空间}} \oplus \underbrace{\mathcal{N}(\mathbf{J})}{\text{零空间}}
+$$
+
+而 $\mathbf{P} = \mathbf{J}^\dagger \mathbf{J}$ 投影到行空间 $\mathcal{R}(\mathbf{J}^\top)$，那么投影到零空间的矩阵自然就是：
+
+$$
+\boxed{ \mathbf{N} = \mathbf{I}_n - \mathbf{J}^\dagger \mathbf{J} }
+$$
+
+———
+4. 验证 $\mathbf{N}$ 确实是到 $\mathcal{N}(\mathbf{J})$ 的正交投影
+
+我们需要验证四个性质：
+
+性质 1：$\mathbf{N}$ 是幂等的（投影矩阵的基本要求）
+$$
+\mathbf{N}^2 = (\mathbf{I} - \mathbf{P})(\mathbf{I} - \mathbf{P}) = \mathbf{I} - 2\mathbf{P} + \mathbf{P}^2 = \mathbf{I} - 2\mathbf{P} + \mathbf{P} = \mathbf{I} - \mathbf{P} = \mathbf{N}
+$$
+
+性质 2：$\mathbf{N}$ 是对称的
+$$
+\mathbf{N}^\top = (\mathbf{I} - \mathbf{P})^\top = \mathbf{I} - \mathbf{P}^\top = \mathbf{I} - \mathbf{P} = \mathbf{N}
+$$
+
+性质 3：对任意 $\mathbf{z}$，$\mathbf{N}\mathbf{z}$ 都在零空间里
+$$
+\mathbf{J}(\mathbf{N}\mathbf{z}) = \mathbf{J}(\mathbf{I} - \mathbf{J}^\dagger \mathbf{J})\mathbf{z} = (\mathbf{J} - \mathbf{J}\mathbf{J}^\dagger \mathbf{J})\mathbf{z} = (\mathbf{J} - \mathbf{I}_m \mathbf{J})\mathbf{z} = \mathbf{0}
+$$
+
+性质 4：如果 $\mathbf{v}$ 已经在零空间里，则 $\mathbf{N}\mathbf{v} = \mathbf{v}$
+若 $\mathbf{v} \in \mathcal{N}(\mathbf{J})$，则 $\mathbf{J}\mathbf{v} = \mathbf{0}$，于是：
+$$
+\mathbf{N}\mathbf{v} = (\mathbf{I} - \mathbf{J}^\dagger \mathbf{J})\mathbf{v} = \mathbf{v} - \mathbf{J}^\dagger (\mathbf{J}\mathbf{v}) = \mathbf{v} - \mathbf{0} = \mathbf{v}
+$$
+
+四个性质全部满足。所以 $\mathbf{N}$ 确实是到 $\mathcal{N}(\mathbf{J})$ 的正交投影矩阵。
+
+———
+5. 几何直觉
+
+想象关节速度空间 $\mathbb{R}^n$ 被分解为两个正交方向：
+
+• 蓝色方向（行空间）：这些关节速度会改变末端位置。$\mathbf{P} = \mathbf{J}^\dagger \mathbf{J}$ 把任意速度投影到蓝方向上。
+• 红色方向（零空间）：这些关节速度不改变末端位置。$\mathbf{N} = \mathbf{I} - \mathbf{P}$ 把任意速度投影到红方向上。
+
+        q̇ (任意关节速度)
+        /|
+       / |
+      /  |  P·q̇  (影响末端的部分)
+     /   |
+    /____|____→ 行空间 R(Jᵀ)
+    \    |
+     \   |  N·q̇  (不影响末端的部分)
+      \  |
+       \ |
+        \|/
+         零空间 N(J)
+
+
+次任务的作用：我们计算一个"理想次任务速度" $\dot{\mathbf{q}}_2^{\text{raw}}$，然后用 $\mathbf{N} \dot{\mathbf{q}}_2^{\text{raw}}$ 把它投影到红方向上——只留下那些不干扰主任务的份量。
+
+———
+
+6. 为什么次任务解法是 $\mathbf{N} (\mathbf{J}_2 \mathbf{N})^\dagger \mathbf{r}_2$？
+
+这里还有一个容易困惑的地方：为什么不是直接用 $\mathbf{N} \mathbf{J}_2^\dagger \mathbf{r}_2$，而是 $(\mathbf{J}_2 \mathbf{N})^\dagger$？
+
+原因：$\mathbf{N}$ 投影后的速度仍然需要满足次任务。我们需要找一个在零空间里的速度 $\dot{\mathbf{q}}_2$，使得：
+$$
+\mathbf{J}_2 \dot{\mathbf{q}}_2 = \mathbf{r}_2 \quad \text{且} \quad \dot{\mathbf{q}}_2 \in \mathcal{N}(\mathbf{J}_1)
+$$
+
+把约束 $\dot{\mathbf{q}}_2 = \mathbf{N}_1 \mathbf{z}$ 代入：
+$$
+\mathbf{J}_2 (\mathbf{N}_1 \mathbf{z}) = \mathbf{r}_2 \implies \mathbf{z} = (\mathbf{J}_2 \mathbf{N}_1)^\dagger \mathbf{r}_2
+$$
+
+于是：
+$$
+\dot{\mathbf{q}}_2 = \mathbf{N}_1 (\mathbf{J}_2 \mathbf{N}_1)^\dagger \mathbf{r}_2
+$$
+
+如果直接用 $\mathbf{N}_1 \mathbf{J}_2^\dagger \mathbf{r}_2$，你只是在把任意次任务解投影到零空间，但没有保证这个投影后的解能最好地完成次任务。$(\mathbf{J}_2 \mathbf{N}_1)^\dagger$ 才是在零空间约束下求解次任务的最小二乘最优解。
+
+———
+一句话总结
+
+$\mathbf{N} = \mathbf{I} - \mathbf{J}^\dagger \mathbf{J}$ 是正交投影矩阵，因为 $\mathbf{J}^\dagger \mathbf{J}$ 投影到 $\mathbf{J}$ 的行空间（所有能影响任务输出的方向），而 $\mathbf{I}$ 减去它自然就把任意向量投影到了行空间的正交补——也就是零空间。
