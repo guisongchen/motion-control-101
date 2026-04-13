@@ -68,7 +68,7 @@ uv.lock
 # Claude
 .claude
 
-output/
+outputs/
 
 conversation.md
 *.png
