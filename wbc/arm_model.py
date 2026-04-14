@@ -82,7 +82,23 @@ class ArmModel:
         qdot_primary = J_ee_pinv @ xdot_star
         
         # Secondary task: minimize elbow angle error while being in the nullspace of the primary task
-        nullspace = np.eye(self.ndof) - J_ee_pinv @ J_ee
-        residual_elbow_dot = elbow_dot_star - (self.jacobian_end_to_elbow() @ qdot_primary).item()
+        nullspace_project = np.eye(self.ndof) - J_ee_pinv @ J_ee
+        
+        # Compute the residual for the secondary task (elbow velocity error after applying primary task)
+        # which means primary task may not fully achieve the desired elbow velocity, 
+        # so we compute how much is left to achieve the secondary task
+        residual_elbow_dot = elbow_dot_star - (J_elbow @ qdot_primary).item()
 
-        projected_row = J_elbow @ nullspace
+        # Project the secondary task Jacobian into the nullspace of the primary task 
+        # to find how much we can still achieve for the elbow velocity without affecting the end-effector velocity
+        # why right multiply by nullspace_project? 
+        # because we want to see how much of the elbow velocity can be achieved in the nullspace of the primary task
+        # if we left multiply by nullspace_project, 
+        # we would be projecting the entire Jacobian into the nullspace, which is not what we want.
+        projected_row = J_elbow @ nullspace_project
+        projected_row_pinv = np.linalg.pinv(projected_row, rcond=config.singularity_threshold)
+
+        qdot_secondary = projected_row_pinv * residual_elbow_dot
+        # Total joint velocity command is the sum of primary and secondary tasks
+        qdot_total = qdot_primary + nullspace_project @ qdot_secondary
+        return qdot_total
