@@ -10,6 +10,11 @@ class ArmModel:
         assert self.ndof == len(initial_q), "Number of joint angles must match number of links"
         
         self.q_curr = initial_q.copy()
+        self.q_dot_curr = np.zeros_like(self.q_curr)
+
+        self.q_history = [self.q_curr.copy()]
+        self.q_dot_history = [self.q_dot_curr.copy()]
+        self.x_history = [self.forward_kinematics()]
 
 
     def forward_kinematics(self) -> np.ndarray:
@@ -24,33 +29,22 @@ class ArmModel:
 
         return np.array([x, y])
     
-    def joint_positions(self) -> np.ndarray:
-        positions = []
-        x = 0
-        y = 0
-        theta = 0
-
-        for i in range(self.ndof):
-            theta += self.q_curr[i]
-            x += self.link_lengths[i] * np.cos(theta)
-            y += self.link_lengths[i] * np.sin(theta)
-            positions.append((x, y))
-
-        return np.array(positions)
-    
     def jacobian_ee(self) -> np.ndarray:
         J = np.zeros((2, self.ndof))
-        x = 0
-        y = 0
         theta = 0
+        thetas = []
 
         for i in range(self.ndof):
             theta += self.q_curr[i]
-            x += self.link_lengths[i] * np.cos(theta)
-            y += self.link_lengths[i] * np.sin(theta)
+            thetas.append(theta)
 
-            J[0, i] = -self.link_lengths[i] * np.sin(theta)
-            J[1, i] = self.link_lengths[i] * np.cos(theta)
+        cumsum_x = 0.0
+        cumsum_y = 0.0
+        for i in range(self.ndof - 1, -1, -1):
+            cumsum_x += self.link_lengths[i] * np.cos(thetas[i])
+            cumsum_y += self.link_lengths[i] * np.sin(thetas[i])
+            J[0, i] = -cumsum_y
+            J[1, i] =  cumsum_x
 
         return J
     
@@ -63,7 +57,7 @@ class ArmModel:
         x_target: np.ndarray, 
         xdot_target: np.ndarray,
         config: SimConfig
-    ) -> np.ndarray:
+    ):
         
         # Compute current end-effector position and Jacobian at q_curr
         x_actual = self.forward_kinematics()
@@ -98,7 +92,13 @@ class ArmModel:
         projected_row = J_elbow @ nullspace_project
         projected_row_pinv = np.linalg.pinv(projected_row, rcond=config.singularity_threshold)
 
-        qdot_secondary = projected_row_pinv * residual_elbow_dot
+        qdot_secondary = (projected_row_pinv * residual_elbow_dot).flatten()
         # Total joint velocity command is the sum of primary and secondary tasks
         qdot_total = qdot_primary + nullspace_project @ qdot_secondary
-        return qdot_total
+
+        self.q_dot_curr = qdot_total.copy()
+        self.q_curr += self.q_dot_curr * config.dt
+
+        self.q_history.append(self.q_curr.copy())
+        self.q_dot_history.append(self.q_dot_curr.copy())
+        self.x_history.append(self.forward_kinematics())
