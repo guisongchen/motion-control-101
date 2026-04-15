@@ -179,9 +179,11 @@ class Simulator:
         )
         return positions, velocities
     
-    def run(self, solver_name: str):
-        link_lengths = np.array([1.0, 1.0, 0.8], dtype=float)
-        arm = ArmModel(link_lengths, self.config.q0)
+    def run(self, 
+            arm: ArmModel, 
+            solver_name: str, 
+            weights: tuple[float, float] | None = None
+        ):
 
         # x_target: (N, 2) array of desired end-effector positions
         # xdot_target: (N, 2) array of desired end-effector velocities
@@ -197,6 +199,15 @@ class Simulator:
                     xdot_target=xdot_target[i], 
                     config=self.config
                 )
+            elif solver_name == "damped_ls":
+                arm.solve_weighted_damped_ls(
+                    x_target=x_target[i], 
+                    xdot_target=xdot_target[i], 
+                    config=self.config,
+                    weights=weights
+                )
+            else:
+                raise ValueError(f"Unknown solver name: {solver_name}")
 
         q = np.array(arm.q_history)
         qdot = np.array(arm.q_dot_history)
@@ -220,18 +231,27 @@ class Simulator:
 if __name__ == "__main__":
     sim_config = SimConfig()
     simulator = Simulator(sim_config)
-    results = simulator.run(solver_name="nullspace")
-    print(summarize_results({"Nullspace IK": results}))
 
     output_dir = Path("output")
     output_dir.mkdir(exist_ok=True)
 
-    results_dict = {"Nullspace IK": results}
     link_lengths = np.array([1.0, 1.0, 0.8], dtype=float)
-    arm = ArmModel(link_lengths, sim_config.q0)
 
+    results_dict = {
+        "Nullspace IK": simulator.run(
+            ArmModel(link_lengths, sim_config.q0), solver_name="nullspace"
+        ),
+        "Weighted Damped LS": simulator.run(
+            ArmModel(link_lengths, sim_config.q0),
+            solver_name="damped_ls",
+            weights=(100.0, 1.0),
+        ),
+    }
+
+    arm = ArmModel(link_lengths, sim_config.q0)
     plot_trajectories(output_dir / "trajectories.png", results_dict, arm)
     plot_tracking_error(output_dir / "tracking_error.png", results_dict)
     plot_elbow_angle(output_dir / "elbow_angle.png", results_dict)
     plot_joint_velocities(output_dir / "joint_velocities.png", results_dict)
-    print(f"Plots saved to {output_dir}/")  
+    print(f"Plots saved to {output_dir}/")
+    print(summarize_results(results_dict))  

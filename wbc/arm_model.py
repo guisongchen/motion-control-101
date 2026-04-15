@@ -52,6 +52,13 @@ class ArmModel:
         J = np.array([[0.0, 1.0 , 0.0]], dtype=float)
         return J
     
+    def update_state(self, q_dot: np.ndarray, dt: float):
+        self.q_dot_curr = q_dot.copy()
+        self.q_curr += self.q_dot_curr * dt
+        self.q_history.append(self.q_curr.copy())
+        self.q_dot_history.append(self.q_dot_curr.copy())
+        self.x_history.append(self.forward_kinematics())
+    
     def solve_ik_nullspace(
         self, 
         x_target: np.ndarray, 
@@ -96,9 +103,38 @@ class ArmModel:
         # Total joint velocity command is the sum of primary and secondary tasks
         qdot_total = qdot_primary + nullspace_project @ qdot_secondary
 
-        self.q_dot_curr = qdot_total.copy()
-        self.q_curr += self.q_dot_curr * config.dt
+        self.update_state(qdot_total, config.dt)
 
-        self.q_history.append(self.q_curr.copy())
-        self.q_dot_history.append(self.q_dot_curr.copy())
-        self.x_history.append(self.forward_kinematics())
+    def solve_weighted_damped_ls(
+        self, 
+        x_target: np.ndarray, 
+        xdot_target: np.ndarray,
+        config: SimConfig,
+        weights: tuple[float, float]
+    ):
+        
+        # Compute current end-effector position and Jacobian at q_curr
+        x_actual = self.forward_kinematics()
+        J_ee = self.jacobian_ee()
+        J_elbow = self.jacobian_end_to_elbow()
+
+        # xdot_star: desired end-effector velocity with primary task PD control
+        xdot_star = xdot_target + config.kp_primary * (x_target - x_actual) # PD control in task space
+        
+        # elbow_dot_star: desired elbow joint velocity with secondary task PD control
+        elbow_dot_star = config.kp_secondary * (config.elbow_target - self.q_curr[1]) # PD control for elbow angle        
+        
+        # Form the weighted Jacobian and desired velocity vector
+
+        J_combined = np.vstack((J_ee, J_elbow))
+        xdot_combined = np.hstack((xdot_star, elbow_dot_star))
+        w_ee, w_elbow = weights
+        W = np.diag([w_ee, w_ee, w_elbow])
+
+        # Solve the weighted damped least squares problem
+        Jt_W = J_combined.T @ W
+        Jt_W_J = Jt_W @ J_combined
+        damping_matrix = (config.wln_damping ** 2) * np.eye(self.ndof)
+        qdot_total = np.linalg.solve(Jt_W_J + damping_matrix, Jt_W @ xdot_combined)
+
+        self.update_state(qdot_total, config.dt)
