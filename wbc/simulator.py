@@ -241,10 +241,15 @@ if __name__ == "__main__":
         "Nullspace IK": simulator.run(
             ArmModel(link_lengths, sim_config.q0), solver_name="nullspace"
         ),
-        "Weighted Damped LS": simulator.run(
+        "DLS(100, 1)": simulator.run(
             ArmModel(link_lengths, sim_config.q0),
             solver_name="damped_ls",
             weights=(100.0, 1.0),
+        ),
+        "DLS(10, 10)": simulator.run(
+            ArmModel(link_lengths, sim_config.q0),
+            solver_name="damped_ls",
+            weights=(10.0, 10.0),
         ),
     }
 
