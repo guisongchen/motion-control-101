@@ -141,10 +141,11 @@ class ArmModel:
         self.update_state(qdot_total, config.dt)
 
     def solve_ik_qp(
-        self, 
-        x_target: np.ndarray, 
+        self,
+        x_target: np.ndarray,
         xdot_target: np.ndarray,
-        config: SimConfig
+        config: SimConfig,
+        weights: tuple[float, float],
     ):
         # Compute current end-effector position and Jacobian at q_curr
         x_actual = self.forward_kinematics()
@@ -152,33 +153,40 @@ class ArmModel:
         J_elbow = self.jacobian_end_to_elbow()
 
         # xdot_star: desired end-effector velocity with primary task PD control
-        xdot_star = xdot_target + config.kp_primary * (x_target - x_actual) # PD control in task space
-        
+        xdot_star = xdot_target + config.kp_primary * (x_target - x_actual)
+
         # elbow_dot_star: desired elbow joint velocity with secondary task PD control
-        elbow_dot_star = config.kp_secondary * (config.elbow_target - self.q_curr[1]) # PD control for elbow angle        
-        
-        # Formulate the QP problem
-        # Minimize: 0.5 * qdot^T * H * qdot
-        # Subject to: J_ee * qdot = xdot_star (primary task)
-        #             J_elbow * qdot = elbow_dot_star (secondary task)
+        elbow_dot_star = config.kp_secondary * (config.elbow_target - self.q_curr[1])
 
-        # meaning of H and f in the context of QP:
-        # H is the quadratic cost matrix that defines how we penalize different joint velocities.
-        # f is the linear cost vector that defines any linear penalties on joint velocities.
-        # A and b define the equality constraints that we want to satisfy, 
-        # which in this case are the desired end-effector and elbow velocities.
+        # Formulate the weighted damped least-squares problem as an unconstrained QP.
+        # Minimize: 0.5 * qdot^T * H * qdot + f^T * qdot
+        # where H = J_combined^T * W * J_combined + lambda^2 * I
+        # and   f = -J_combined^T * W * xdot_combined
+        J_combined = np.vstack((J_ee, J_elbow))
+        xdot_combined = np.hstack((xdot_star, elbow_dot_star))
+        w_ee, w_elbow = weights
+        W = np.diag([w_ee, w_ee, w_elbow])
 
-        H = np.eye(self.ndof)  # Quadratic cost on joint velocities
-        f = np.zeros(self.ndof)  # No linear cost
+        H = J_combined.T @ W @ J_combined + (config.wln_damping ** 2) * np.eye(self.ndof)
+        f = -J_combined.T @ W @ xdot_combined
 
-        # Equality constraints for primary and secondary tasks
-        A_eq = np.vstack((J_ee, J_elbow))
-        b_eq = np.hstack((xdot_star, elbow_dot_star))
+        # OSQP requires sparse P and A
+        import scipy.sparse as sp
 
-        # Solve the QP problem using OSQP
+        A_ineq = sp.eye(self.ndof, format="csc")
+        l_ineq = np.full(self.ndof, config.qdot_min)
+        u_ineq = np.full(self.ndof, config.qdot_max)
+
         prob = osqp.OSQP()
-        prob.setup(P=H, q=f, A=A_eq, l=b_eq, u=b_eq, verbose=False)
+        prob.setup(
+            P=sp.csc_matrix(H),
+            q=f,
+            A=A_ineq,
+            l=l_ineq,
+            u=u_ineq,
+            verbose=False,
+        )
         res = prob.solve()
         qdot_total = res.x
-        
+
         self.update_state(qdot_total, config.dt)

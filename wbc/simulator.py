@@ -120,7 +120,7 @@ def plot_joint_velocities(
     results: dict[str, dict[str, np.ndarray | str]],
 ) -> None:
     figure, axes = plt.subplots(3, 1, figsize=(10, 10), sharex=True, constrained_layout=True)
-    colors = ["tab:blue", "tab:orange", "tab:green"]
+    colors = ["tab:blue", "tab:orange", "tab:green", "tab:red"]
 
     for joint_index, axis in enumerate(axes):
         for color, (name, result) in zip(colors, results.items()):
@@ -206,6 +206,13 @@ class Simulator:
                     config=self.config,
                     weights=weights
                 )
+            elif solver_name == "qp":
+                arm.solve_ik_qp(
+                    x_target=x_target[i], 
+                    xdot_target=xdot_target[i], 
+                    config=self.config,
+                    weights=weights
+                )
             else:
                 raise ValueError(f"Unknown solver name: {solver_name}")
 
@@ -250,6 +257,11 @@ if __name__ == "__main__":
             ArmModel(link_lengths, sim_config.q0),
             solver_name="damped_ls",
             weights=(10.0, 10.0),
+        ),
+        "QP(1, 1)": simulator.run(
+            ArmModel(link_lengths, sim_config.q0),
+            solver_name="qp",
+            weights=(1.0, 1.0),
         ),
     }
 
