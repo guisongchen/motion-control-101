@@ -185,6 +185,8 @@ class ArmModel:
             l=l_ineq,
             u=u_ineq,
             verbose=False,
+            eps_abs=1e-6,
+            eps_rel=1e-6,
         )
         res = prob.solve()
         qdot_total = res.x

@@ -15,5 +15,5 @@ class SimConfig:
     singularity_threshold: float = 1e-6
     pseudo_damping: float = 1e-4
     wln_damping: float = 0.05
-    qdot_min: float = -5.0
-    qdot_max: float = 5.0
+    qdot_min: float = -20.0
+    qdot_max: float = 20.0
