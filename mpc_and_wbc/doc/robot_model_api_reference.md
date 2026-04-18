@@ -29,6 +29,7 @@
 | `num_joints` | `int` | URDF 中声明的关节总数 |
 | `dof_joints` | `List[int]` | 自由度关节索引列表（排除 `JOINT_FIXED`） |
 | `nv` | `int` | 广义速度维度 = `6 + len(dof_joints)` |
+| `link_name_to_index` | `Dict[str, int]` | link 名到 PyBullet link 索引的映射（基座为 -1） |
 | `nq` | `int` | 广义位置维度 = `7 + num_joints`（含固定关节占位） |
 | `total_mass` | `float` | 机器人总质量 [kg]，初始化时计算并断言为正 |
 
@@ -43,9 +44,9 @@
 Unitree G1 中存在固定关节的原因：头部相机/IMU 模块、手部简化表示、装饰性外壳等作为独立 link 通过固定关节连接。
 
 **为什么不从 `v` 中排除固定关节：**
-- `calculateMassMatrix`、`calculateJacobian`、`calculateInverseDynamics` 要求 `jointPositions` 长度为 `num_joints`
-- 若排除固定关节，后续关节索引整体错位，PyBullet 会把第 3 个自由度关节的值当成第 4 个关节使用
-- 因此 `q` 保持完整长度，`v` 只保留真实自由度，确保 API 调用安全
+- `q` 保持完整长度（含固定关节占位），方便从 `getJointStates` 直接填充且索引不错位
+- `v` 只保留真实自由度，与动力学矩阵 $M$、Jacobians 的列数一致
+- PyBullet API（2025 年 1 月版本起）要求 `calculateMassMatrix`、`calculateJacobian`、`calculateInverseDynamics` 的 `jointPositions` / `jointVelocities` 长度为**自由度数量**（不含固定关节），代码通过 `_get_dof_positions` / `_get_dof_velocities` 自动提取
 
 ---
 
@@ -70,12 +71,25 @@ PyBullet 没有统一的"读取全部状态"API：
 
 ## 4. 动力学计算
 
+### `_get_dof_positions(q) -> list`
+
+从完整 `q` 中提取自由度关节位置列表（长度 = `len(dof_joints)`），供 PyBullet 动力学 API 使用。
+
+### `_get_dof_velocities(v) -> list`
+
+从完整 `v` 中提取自由度关节速度列表，供 `calculateInverseDynamics` 使用。
+
+> **PyBullet API 兼容性（2025 年 1 月版本起）：** `calculateMassMatrix`、`calculateJacobian`、`calculateInverseDynamics` 的 `jointPositions` / `jointVelocities` 参数长度必须等于**自由度数量**（不含固定关节）。此前版本允许传入 `num_joints` 长度（固定关节填 0），新版会抛出 `numDof needs to be positive` 错误。
+
+---
+
 ### `compute_mass_matrix(q) -> np.ndarray`
 
 计算质量矩阵 $M(q)$，维度 `(nv, nv)`。
 
 **实现：**
 ```python
+joint_positions = self._get_dof_positions(q)
 M, _ = p.calculateMassMatrix(self.robot_id, joint_positions)
 ```
 
@@ -83,7 +97,7 @@ M, _ = p.calculateMassMatrix(self.robot_id, joint_positions)
 
 质量矩阵只取决于机器人的"构型"（各连杆相对姿态），不取决于在世界坐标系中的绝对位置。PyBullet 内部已保存基座状态，且质量矩阵是"构型相关、位姿无关"的——机器人平移/旋转到任何地方，只要关节角不变，$M$ 就不变。
 
-**返回矩阵已包含基座：** 虽然只传了关节位置，返回的 $M$ 维度仍是 `(nv, nv)`，前 6×6 块就是浮动基的惯性。
+**返回矩阵已包含基座：** 虽然只传了自由度关节位置，返回的 $M$ 维度仍是 `(nv, nv)`，前 6×6 块就是浮动基的惯性。
 
 ---
 
@@ -93,6 +107,8 @@ M, _ = p.calculateMassMatrix(self.robot_id, joint_positions)
 
 **实现：**
 ```python
+positions = self._get_dof_positions(q)
+velocities = self._get_dof_velocities(v)
 C = p.calculateInverseDynamics(robot_id, positions, velocities, [0.0]*n)
 ```
 
@@ -206,7 +222,21 @@ $$\|J_L \dot{v} - \dot{L}_{\text{des}}\|_{W_2}^2$$
 
 ---
 
-## 6. 连杆位姿查询
+## 6. 接触检测
+
+### `check_contact(link_index, other_body_id=-1) -> Tuple[bool, float]`
+
+检测指定 link 是否与目标 body 接触。
+
+- `link_index`: 待检测的 link 索引（`-1` 为基座）
+- `other_body_id`: 目标 body ID，默认 `-1` 表示与**所有** body 检测
+- 返回：`(is_contact, normal_force)` —— 是否接触、法向力之和 [N]
+
+**实现细节：** 调用 `p.getContactPoints(bodyA=robot_id, linkIndexA=link_index)`。注意 `bodyB` 参数不可传 `None`，因此当 `other_body_id < 0` 时直接省略 `bodyB` 关键字。
+
+---
+
+## 7. 连杆位姿查询
 
 ### `get_link_com_position(link_index) -> np.ndarray`
 
@@ -246,7 +276,7 @@ $$[v]_\times = \begin{bmatrix} 0 & -v_z & v_y \\ v_z & 0 & -v_x \\ -v_y & v_x & 
 
 ### `reset_joint_positions(joint_positions)`
 
-重置关节位置到指定值。
+重置**自由度关节**位置到指定值（跳过固定关节）。`joint_positions` 长度应与 `len(dof_joints)` 对应，按 `dof_joints` 的顺序填充。
 
 ### `reset_base_pose(position, orientation)`
 
