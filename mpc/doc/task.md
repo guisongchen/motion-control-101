@@ -209,8 +209,14 @@ Phase 4：预测时域 N 的 Trade-off 分析
 - [x] 独立的 MPC 控制器模块（可配置 $N, Q, R, P$，支持控制约束和状态约束）（`mpc/controllers/mpc.py`）
 - [x] 带约束/不带约束的对比实验脚本（`mpc/phase3_constraint_sim.py`）
 - [x] 状态约束对比实验脚本（`mpc/phase3_2_state_constraint_sim.py`）
-- [ ] N 的 trade-off 扫参脚本
-- [ ] 结果图表与分析笔记
+- [x] N 的 trade-off 扫参脚本 (`mpc/phase4_n_tradeoff.py`)
+- [x] 结果图表与分析笔记
+
+**Phase 4 实现发现**：
+- 对于 theta0=0.1（小扰动），±5N 推力约束未激活，所有 N 值（5~80）给出完全一致的轨迹与代价。
+- 这是因为 P 设为离散 ARE 解时，即使 N=5，无约束 MPC 也等价于无限时域 LQR；短视现象只有在约束活跃或 P≠ARE 时才会显现。
+- 求解时间随 N 近似线性增长：N=5 约 0.003 ms → N=80 约 0.235 ms，均远小于控制周期 T=10 ms。
+- 在线性 MPC 中，对于小规模系统（nx=4, nu=1），即使 N=80 的 QP 求解也极快； walking 机器人使用线性 MPC 的关键原因正是可在 1kHz（1 ms）周期内完成求解，而非线性 MPC（10-100 倍耗时）在 1kHz 下不可行。
 
 ---
 需要我对任何一个 Phase 的细节再展开吗？比如 Phase 2.2 中 $H$ 和 $g$ 的具体构造公式，或者 Phase 3 中状态约束如何映射为 OSQP 的 $A$ 矩阵？
