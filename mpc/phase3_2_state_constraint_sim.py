@@ -1,11 +1,12 @@
 """
-Phase 3.2: State constraint experiment — MPC with |theta| <= 0.5 rad.
+Phase 3.2: State constraint experiment — MPC with pole angular velocity |theta_dot| <= 0.25 rad/s.
 
 Compares:
 1. MPC with control bounds only (±5 N)
-2. MPC with control bounds + state constraint on theta (±0.5 rad at all prediction steps)
+2. MPC with control bounds + state constraint on pole angular velocity (|theta_dot| <= 0.25 rad/s at all prediction steps)
 
-Initial condition: theta0 = 0.4 rad (large enough to trigger state constraint in prediction).
+Initial condition: theta0 = 0.2 rad.
+State constraint index 3 = pole angular velocity theta_dot.
 """
 
 import sys
@@ -69,9 +70,9 @@ def run_mpc(
     J_hist = np.zeros(n_steps)
     solve_time_hist = np.zeros(n_steps)
     iter_hist = np.zeros(n_steps, dtype=int)
-    # Track predicted theta max at each timestep
-    pred_theta_max_hist = np.zeros(n_steps)
-    pred_theta_min_hist = np.zeros(n_steps)
+    # Track predicted pole angular velocity max/min at each timestep
+    pred_thetadot_max_hist = np.zeros(n_steps)
+    pred_thetadot_min_hist = np.zeros(n_steps)
 
     if render:
         from mujoco import viewer
@@ -98,11 +99,11 @@ def run_mpc(
         solve_time_hist[k] = info["solve_time_ms"]
         iter_hist[k] = info["iter"]
 
-        # Record predicted theta range from open-loop prediction
+        # Record predicted pole angular velocity range from open-loop prediction
         X_pred = info["X_pred"]
-        thetas_pred = X_pred[2::4]  # theta component of each predicted state
-        pred_theta_max_hist[k] = np.max(thetas_pred)
-        pred_theta_min_hist[k] = np.min(thetas_pred)
+        thetadots_pred = X_pred[3::4]  # pole angular velocity component of each predicted state
+        pred_thetadot_max_hist[k] = np.max(thetadots_pred)
+        pred_thetadot_min_hist[k] = np.min(thetadots_pred)
 
         mujoco.mj_step(model, data)
 
@@ -136,8 +137,8 @@ def run_mpc(
         "cost": J_hist,
         "solve_time_ms": solve_time_hist,
         "iter": iter_hist,
-        "pred_theta_max": pred_theta_max_hist,
-        "pred_theta_min": pred_theta_min_hist,
+        "pred_thetadot_max": pred_thetadot_max_hist,
+        "pred_thetadot_min": pred_thetadot_min_hist,
         "settling_time": settling_time,
         "overshoot_rad": overshoot,
         "max_force": np.max(np.abs(u_hist)),
@@ -155,7 +156,7 @@ def run_mpc(
 def plot_comparison(
     baseline: dict,
     constrained: dict,
-    theta_bound: float = 0.5,
+    thetadot_bound: float = 0.25,
     save_path: str | Path | None = None,
 ):
     """Overlay MPC without vs with state constraints."""
@@ -173,7 +174,7 @@ def plot_comparison(
     ax.axhline(-0.01, color="gray", ls="--", lw=0.8)
     ax.set_ylabel("state")
     ax.legend(loc="upper right", ncol=2)
-    ax.set_title(f"Phase 3.2: MPC Control-only vs MPC with State Constraint |theta| <= {theta_bound} rad")
+    ax.set_title(f"Phase 3.2: MPC Control-only vs MPC with State Constraint |theta_dot| <= {thetadot_bound} rad/s")
     ax.grid(True, alpha=0.3)
 
     # Control trajectory with saturation bands
@@ -186,15 +187,15 @@ def plot_comparison(
     ax.legend(loc="upper right")
     ax.grid(True, alpha=0.3)
 
-    # Predicted theta range (open-loop at each timestep)
+    # Predicted pole angular velocity range (open-loop at each timestep)
     ax = axes[2]
-    ax.fill_between(t, baseline["pred_theta_min"], baseline["pred_theta_max"], color="C1", alpha=0.2, label="predicted theta range (control-only)")
-    ax.fill_between(t, constrained["pred_theta_min"], constrained["pred_theta_max"], color="C4", alpha=0.2, label="predicted theta range (state-constrained)")
-    ax.plot(t, baseline["state"][:, 2], color="C1", lw=1.0, ls="-", label="actual theta (control-only)")
-    ax.plot(t, constrained["state"][:, 2], color="C4", lw=1.0, ls="--", label="actual theta (state-constrained)")
-    ax.axhline(theta_bound, color="red", ls=":", lw=1.0, alpha=0.7, label=f"state bound ±{theta_bound} rad")
-    ax.axhline(-theta_bound, color="red", ls=":", lw=1.0, alpha=0.7)
-    ax.set_ylabel("theta [rad]")
+    ax.fill_between(t, baseline["pred_thetadot_min"], baseline["pred_thetadot_max"], color="C1", alpha=0.2, label="predicted theta_dot range (control-only)")
+    ax.fill_between(t, constrained["pred_thetadot_min"], constrained["pred_thetadot_max"], color="C4", alpha=0.2, label="predicted theta_dot range (state-constrained)")
+    ax.plot(t, baseline["state"][:, 3], color="C1", lw=1.0, ls="-", label="actual theta_dot (control-only)")
+    ax.plot(t, constrained["state"][:, 3], color="C4", lw=1.0, ls="--", label="actual theta_dot (state-constrained)")
+    ax.axhline(thetadot_bound, color="red", ls=":", lw=1.0, alpha=0.7, label=f"state bound ±{thetadot_bound} rad/s")
+    ax.axhline(-thetadot_bound, color="red", ls=":", lw=1.0, alpha=0.7)
+    ax.set_ylabel("pole angular velocity theta_dot [rad/s]")
     ax.legend(loc="upper right", ncol=2)
     ax.grid(True, alpha=0.3)
 
@@ -240,10 +241,10 @@ if __name__ == "__main__":
     out_dir.mkdir(exist_ok=True)
 
     duration = 5.0
-    theta0 = 0.4
+    theta0 = 0.2
     N = 20
     u_min, u_max = -5.0, 5.0
-    theta_bound = 0.5
+    thetadot_bound = 0.25
 
     print(f"Running MPC control-only (theta0={theta0} rad, N={N})...")
     baseline = run_mpc(
@@ -257,9 +258,9 @@ if __name__ == "__main__":
         label="MPC-control",
     )
 
-    print(f"Running MPC with state constraint |theta|<={theta_bound} (theta0={theta0} rad, N={N})...")
+    print(f"Running MPC with state constraint |theta_dot|<={thetadot_bound} (theta0={theta0} rad, N={N})...")
     state_constraints = [
-        {"idx": 2, "lb": -theta_bound, "ub": theta_bound, "steps": "all"},
+        {"idx": 3, "lb": -thetadot_bound, "ub": thetadot_bound, "steps": "all"},
     ]
     constrained = run_mpc(
         xml_path,
@@ -277,6 +278,6 @@ if __name__ == "__main__":
     plot_comparison(
         baseline,
         constrained,
-        theta_bound=theta_bound,
+        thetadot_bound=thetadot_bound,
         save_path=out_dir / "phase3_2_state_constraint_comparison.png",
     )

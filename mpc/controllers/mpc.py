@@ -225,6 +225,11 @@ class LinearMPC:
             verbose=False,
             polish=False,
             warm_start=True,
+            eps_abs=1e-9,
+            eps_rel=1e-9,
+            eps_prim_inf=1e-6,
+            eps_dual_inf=1e-6,
+            max_iter=10000,
         )
         self._A_con = A_sparse
         self._l = l
