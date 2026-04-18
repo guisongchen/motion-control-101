@@ -50,7 +50,7 @@ def main():
     x_ref[2] = H_COM          # z 方向高度
     u_ref = np.zeros(NU)
     # 补偿重力
-    u_ref[2] = -GRAVITY[2] *  # TODO: 填入总质量
+    u_ref[2] = -GRAVITY[2] * 10 # TODO: 填入总质量
 
     mpc.set_reference(x_ref, u_ref)
 

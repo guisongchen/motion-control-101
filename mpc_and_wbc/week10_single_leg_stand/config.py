@@ -15,7 +15,7 @@ MU = 0.8                      # 地面摩擦系数
 # ---------------------------------------------------------------------------
 # 机器人模型参数
 # ---------------------------------------------------------------------------
-URDF_PATH = "humanoid.urdf"   # 可替换为 Atlas 简化版等
+URDF_PATH = "/home/ccc/projects/unitree_ros/robots/g1_description/g1_23dof.urdf" 
 INITIAL_POSE = "standing"     # 初始姿势：双脚站立
 LIFT_LEG = "left"             # t=0.5s 抬起的腿
 LIFT_TIME = 0.5               # 抬腿时刻 [s]
