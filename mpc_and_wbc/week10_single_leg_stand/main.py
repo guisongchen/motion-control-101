@@ -212,6 +212,8 @@ def main():
     # =====================================================================
     plot_com_tracking(time_log, com_log, com_ref_log)
 
+    # do not close the PyBullet window immediately to allow inspection
+    input("\nPress Enter to exit...")
     p.disconnect()
 
 
