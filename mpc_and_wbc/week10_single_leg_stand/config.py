@@ -28,21 +28,21 @@ FOOT_LINK_NAMES = [
 ]
 
 # 初始站立姿态（弧度）
-# 注意：这些值需要根据实际仿真效果微调
+# 先测试零位姿态，观察稳定性后再微调
 STANDING_JOINT_ANGLES = {
     # 左腿
     "left_hip_pitch_joint": 0.0,
     "left_hip_roll_joint": 0.0,
     "left_hip_yaw_joint": 0.0,
-    "left_knee_joint": 0.2,
-    "left_ankle_pitch_joint": -0.1,
+    "left_knee_joint": 0.0,
+    "left_ankle_pitch_joint": 0.0,
     "left_ankle_roll_joint": 0.0,
     # 右腿
     "right_hip_pitch_joint": 0.0,
     "right_hip_roll_joint": 0.0,
     "right_hip_yaw_joint": 0.0,
-    "right_knee_joint": 0.2,
-    "right_ankle_pitch_joint": -0.1,
+    "right_knee_joint": 0.0,
+    "right_ankle_pitch_joint": 0.0,
     "right_ankle_roll_joint": 0.0,
     # 躯干
     "waist_yaw_joint": 0.0,
@@ -60,7 +60,7 @@ STANDING_JOINT_ANGLES = {
 }
 
 # 基座初始位姿
-BASE_INITIAL_POS = np.array([0.0, 0.0, 0.95])       # [x, y, z] —— 需要根据 URDF 零位微调
+BASE_INITIAL_POS = np.array([0.0, 0.0, 0.697])      # 零位下 foot-to-base ≈ 0.697 m
 BASE_INITIAL_ORN = np.array([0.0, 0.0, 0.0, 1.0])   # [qx, qy, qz, qw]
 
 # ---------------------------------------------------------------------------

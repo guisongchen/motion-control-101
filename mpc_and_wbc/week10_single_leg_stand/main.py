@@ -53,19 +53,17 @@ def main():
 
     robot.reset_joint_positions(initial_dof_angles)
 
-    # 设置所有自由度关节为力矩控制模式（重置后 PyBullet 默认是 position control）
-    for joint_idx in robot.dof_joints:
+    # 设置所有自由度关节为位置控制模式（测试双足站立姿态）
+    for idx, joint_idx in enumerate(robot.dof_joints):
         p.setJointMotorControl2(
             robot.robot_id, joint_idx,
-            p.VELOCITY_CONTROL, targetVelocity=0, force=0
-        )
-        p.setJointMotorControl2(
-            robot.robot_id, joint_idx,
-            p.TORQUE_CONTROL, force=0
+            p.POSITION_CONTROL,
+            targetPosition=initial_dof_angles[idx],
+            force=500.0,
         )
 
     # =====================================================================
-    # 3. 初始化控制器
+    # 3. 初始化控制器（暂不启用）
     # =====================================================================
     mpc = CentroidalMPC()
     nv = robot.nv
@@ -75,7 +73,6 @@ def main():
     x_ref = np.zeros(NX)
     x_ref[2] = H_COM          # z 方向高度
     u_ref = np.zeros(NU)
-    # 补偿重力
     u_ref[2] = -GRAVITY[2] * robot.total_mass
 
     mpc.set_reference(x_ref, u_ref)
@@ -83,8 +80,8 @@ def main():
     # =====================================================================
     # 4. 仿真主循环
     # =====================================================================
-    wbc_period = int(1.0 / (WBC_FREQ * DT_SIM))   # 每多少个物理步执行一次 WBC
-    mpc_period = int(1.0 / (MPC_FREQ * DT_SIM))   # 每多少个物理步执行一次 MPC
+    wbc_period = max(1, int(1.0 / (WBC_FREQ * DT_SIM)))   # 不低于物理步长
+    mpc_period = max(1, int(1.0 / (MPC_FREQ * DT_SIM)))
 
     step = 0
     total_steps = int(SIM_DURATION / DT_SIM)
@@ -93,13 +90,23 @@ def main():
     time_log = []
     com_log = []
     com_ref_log = []
-    force_log = []
-    tau_log = []
-    mpc_time_log = []
-    wbc_time_log = []
+    foot_pos_log = {link: [] for link in candidate_foot_links}
+    foot_force_log = {link: [] for link in candidate_foot_links}
+    support_foot_log = []
+
+    # 记录初始足端位置（用于滑移检测）
+    initial_foot_pos = {
+        link: robot.get_link_com_position(link)
+        for link in candidate_foot_links
+    }
 
     # t=0.5s 抬腿动作（预设轨迹，非 MPC/WBC 控制）
     leg_lifted = False
+
+    print("\n===== 开始仿真（双足站立测试模式）=====")
+    print(f"总质量: {robot.total_mass:.2f} kg")
+    print(f"仿真时长: {SIM_DURATION:.1f} s")
+    print("=" * 50)
 
     while step < total_steps:
         t = step * DT_SIM
@@ -114,60 +121,29 @@ def main():
         q = state["q"]
         v = state["v"]
         support_foot_link = state["support_foot_link"]
-        x0 = np.concatenate([c, c_dot, L])
+        foot_contacts = state["foot_contacts"]
 
         # -----------------------------------------------------------------
-        # 4.2 MPC 重求解（50 Hz）
+        # 4.2 MPC / WBC 求解（当前禁用，仅保留占位）
         # -----------------------------------------------------------------
-        if step % mpc_period == 0:
-            # TODO: 更新动力学线性化矩阵 A_d, B_d, d_d
-            # mpc.set_dynamics(A_d, B_d, d_d)
-
-            t0 = time.time()
-            mpc_result = mpc.solve(x0)
-            mpc_time = time.time() - t0
-            mpc_time_log.append(mpc_time)
-
-            if mpc_result is not None:
-                x_traj = mpc_result["x_traj"]
-                f_ref = mpc_result["u0"]
-            else:
-                print(f"[WARN] t={t:.3f}s MPC 求解失败")
-                f_ref = u_ref
+        # TODO: 实现 MPC + WBC 闭环控制
+        # x0 = np.concatenate([c, c_dot, L])
+        # if step % mpc_period == 0:
+        #     mpc_result = mpc.solve(x0)
+        # if step % wbc_period == 0:
+        #     wbc_result = wbc.solve(...)
 
         # -----------------------------------------------------------------
-        # 4.3 WBC（1 kHz）
+        # 4.3 维持初始姿态（POSITION_CONTROL 测试模式）
         # -----------------------------------------------------------------
         if step % wbc_period == 0:
-            # TODO: 计算当前动力学量
-            # M = robot.compute_mass_matrix(q)
-            # C = robot.compute_coriolis_gravity(q, v)
-            # J_c = robot.get_foot_jacobian(support_foot_link, q)
-            # Jc_dot = ...
-            # J_com = robot.get_com_jacobian(q)
-            # J_L = robot.get_angular_momentum_jacobian(q)
-
-            # TODO: 计算期望量
-            # c_ddot_des = wbc.compute_desired_acceleration(...)
-            # L_dot_des = wbc.compute_desired_momentum_rate(...)
-
-            t0 = time.time()
-            # wbc_result = wbc.solve(...)
-            wbc_time = time.time() - t0
-            wbc_time_log.append(wbc_time)
-
-            # if wbc_result is not None:
-            #     tau = wbc_result["tau"]
-            #     f = wbc_result["f"]
-            # else:
-            #     print(f"[WARN] t={t:.3f}s WBC 求解失败")
-            #     tau = np.zeros(robot.num_joints)
-            #     f = np.zeros(3)
-
-            # TODO: 发送力矩指令到 PyBullet
-            # for i, joint_id in enumerate(controlled_joints):
-            #     p.setJointMotorControl2(robot.robot_id, joint_id,
-            #                             p.TORQUE_CONTROL, force=tau[i])
+            for idx, joint_idx in enumerate(robot.dof_joints):
+                p.setJointMotorControl2(
+                    robot.robot_id, joint_idx,
+                    p.POSITION_CONTROL,
+                    targetPosition=initial_dof_angles[idx],
+                    force=500.0,
+                )
 
         # -----------------------------------------------------------------
         # 4.4 抬腿动作（t=0.5s）
@@ -189,25 +165,52 @@ def main():
         time_log.append(t)
         com_log.append(c.copy())
         com_ref_log.append(x_ref[:3].copy())
-        # force_log.append(f.copy())
-        # tau_log.append(tau.copy())
+        support_foot_log.append(support_foot_link)
+
+        for fc in foot_contacts:
+            link = fc["link"]
+            foot_pos_log[link].append(fc["position"].copy())
+            foot_force_log[link].append(fc["normal_force"])
+
+        # -----------------------------------------------------------------
+        # 4.7 周期性打印状态
+        # -----------------------------------------------------------------
+        if step % 240 == 0:  # 每秒打印一次
+            print(f"\n--- t={t:.3f}s ---")
+            print(f"  CoM: [{c[0]:.3f}, {c[1]:.3f}, {c[2]:.3f}]  (ref z={H_COM:.2f})")
+            for fc in foot_contacts:
+                link_name = FOOT_LINK_NAMES[candidate_foot_links.index(fc["link"])]
+                slip = np.linalg.norm(fc["position"][:2] - initial_foot_pos[fc["link"]][:2])
+                print(f"  {link_name}: force={fc['normal_force']:.1f}N  slip={slip*1000:.2f}mm")
 
     # =====================================================================
     # 5. 评估指标
     # =====================================================================
     rmse = compute_rmse(com_log, com_ref_log)
-    print(f"\n===== 实验结果 =====")
+    print(f"\n{'='*50}")
+    print("===== 实验结果（双足站立测试模式）=====")
     print(f"CoM 位置 RMSE: {rmse:.4f} m (目标 < {RMSE_THRESH} m)")
-    print(f"MPC 平均求解时间: {np.mean(mpc_time_log)*1000:.2f} ms (目标 < {MPC_TIME_THRESH*1000:.1f} ms)")
-    print(f"WBC 平均求解时间: {np.mean(wbc_time_log)*1000:.3f} ms (目标 < {WBC_TIME_THRESH*1000:.1f} ms)")
-    # TODO: 计算支撑足滑移
+
+    # 足端滑移
+    max_slip = 0.0
+    for link in candidate_foot_links:
+        positions = np.array(foot_pos_log[link])
+        if len(positions) > 0:
+            slips = np.linalg.norm(positions[:, :2] - initial_foot_pos[link][:2], axis=1)
+            max_slip = max(max_slip, np.max(slips))
+    print(f"最大足端滑移: {max_slip*1000:.2f} mm (目标 < {SLIP_THRESH*1000:.1f} mm)")
+
+    # 接触力统计
+    for link in candidate_foot_links:
+        forces = np.array(foot_force_log[link])
+        link_name = FOOT_LINK_NAMES[candidate_foot_links.index(link)]
+        avg_force = np.mean(forces) if len(forces) > 0 else 0.0
+        print(f"{link_name} 平均接触力: {avg_force:.1f} N")
 
     # =====================================================================
     # 6. 可视化
     # =====================================================================
     plot_com_tracking(time_log, com_log, com_ref_log)
-    # plot_contact_force(time_log, force_log)
-    # plot_torques(time_log, tau_log)
 
     p.disconnect()
 

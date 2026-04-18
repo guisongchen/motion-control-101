@@ -106,11 +106,22 @@ class RobotModel:
         return q, v
 
     # -----------------------------------------------------------------------
+    # 辅助：构造自由度关节位置 / 速度 / 加速度列表
+    # -----------------------------------------------------------------------
+    def _get_dof_positions(self, q: np.ndarray) -> list:
+        """从完整 q 中提取自由度关节位置（用于 PyBullet API）。"""
+        return [float(q[7 + idx]) for idx in self.dof_joints]
+
+    def _get_dof_velocities(self, v: np.ndarray) -> list:
+        """从完整 v 中提取自由度关节速度。"""
+        return [float(v[6 + idx]) for idx in range(len(self.dof_joints))]
+
+    # -----------------------------------------------------------------------
     # 动力学计算
     # -----------------------------------------------------------------------
     def compute_mass_matrix(self, q: np.ndarray) -> np.ndarray:
         """计算质量矩阵 M(q)，维度 (nv, nv)。"""
-        joint_positions = q[7:].tolist()
+        joint_positions = self._get_dof_positions(q)
         M, _ = p.calculateMassMatrix(self.robot_id, joint_positions)
         return np.array(M)
 
@@ -120,14 +131,9 @@ class RobotModel:
 
         通过将加速度设为零调用 calculateInverseDynamics 得到。
         """
-        joint_positions = q[7:].tolist()
-
-        # PyBullet 需要完整长度的关节速度（含固定关节）
-        v_full = np.zeros(self.num_joints)
-        for idx, joint_idx in enumerate(self.dof_joints):
-            v_full[joint_idx] = v[6 + idx]
-        obj_velocities = v_full.tolist()
-        obj_accelerations = [0.0] * self.num_joints
+        joint_positions = self._get_dof_positions(q)
+        obj_velocities = self._get_dof_velocities(v)
+        obj_accelerations = [0.0] * len(self.dof_joints)
 
         C = p.calculateInverseDynamics(
             self.robot_id, joint_positions, obj_velocities, obj_accelerations
@@ -180,12 +186,13 @@ class RobotModel:
         """
         if local_position is None:
             local_position = [0.0, 0.0, 0.0]
-        joint_positions = q[7:].tolist()
+        joint_positions = self._get_dof_positions(q)
+        n_dof = len(self.dof_joints)
         lin_jac, ang_jac = p.calculateJacobian(
             self.robot_id, foot_link, local_position,
             joint_positions,
-            [0.0] * self.num_joints,
-            [0.0] * self.num_joints,
+            [0.0] * n_dof,
+            [0.0] * n_dof,
         )
         J_c = np.vstack([np.array(lin_jac), np.array(ang_jac)])
         return J_c
@@ -196,7 +203,9 @@ class RobotModel:
 
         J_com = (1 / M) * sum_i(m_i * J_{v_i})
         """
-        joint_positions = q[7:].tolist()
+        joint_positions = self._get_dof_positions(q)
+        n_dof = len(self.dof_joints)
+        zero_dof = [0.0] * n_dof
         J_com = np.zeros((3, self.nv))
 
         # 基座
@@ -204,9 +213,7 @@ class RobotModel:
         if mass > 0.0:
             lin_jac, _ = p.calculateJacobian(
                 self.robot_id, -1, local_inertial_pos,
-                joint_positions,
-                [0.0] * self.num_joints,
-                [0.0] * self.num_joints,
+                joint_positions, zero_dof, zero_dof,
             )
             J_com += mass * np.array(lin_jac)
 
@@ -217,9 +224,7 @@ class RobotModel:
                 continue
             lin_jac, _ = p.calculateJacobian(
                 self.robot_id, i, local_inertial_pos,
-                joint_positions,
-                [0.0] * self.num_joints,
-                [0.0] * self.num_joints,
+                joint_positions, zero_dof, zero_dof,
             )
             J_com += mass * np.array(lin_jac)
 
@@ -233,7 +238,9 @@ class RobotModel:
         J_L = sum_i( I_i_world * J_{w_i} + m_i * [r_i - c]x * J_{v_i} )
         """
         c = self.compute_com_position()
-        joint_positions = q[7:].tolist()
+        joint_positions = self._get_dof_positions(q)
+        n_dof = len(self.dof_joints)
+        zero_dof = [0.0] * n_dof
         J_L = np.zeros((3, self.nv))
 
         # 基座
@@ -241,9 +248,7 @@ class RobotModel:
         if mass > 0.0:
             lin_jac, ang_jac = p.calculateJacobian(
                 self.robot_id, -1, local_inertial_pos,
-                joint_positions,
-                [0.0] * self.num_joints,
-                [0.0] * self.num_joints,
+                joint_positions, zero_dof, zero_dof,
             )
             J_v = np.array(lin_jac)
             J_w = np.array(ang_jac)
@@ -264,9 +269,7 @@ class RobotModel:
 
             lin_jac, ang_jac = p.calculateJacobian(
                 self.robot_id, i, local_inertial_pos,
-                joint_positions,
-                [0.0] * self.num_joints,
-                [0.0] * self.num_joints,
+                joint_positions, zero_dof, zero_dof,
             )
             J_v = np.array(lin_jac)
             J_w = np.array(ang_jac)
@@ -351,10 +354,16 @@ class RobotModel:
             is_contact: 是否存在接触点
             normal_force: 所有接触点的法向力之和 [N]
         """
-        contact_points = p.getContactPoints(
-            bodyA=self.robot_id,
-            bodyB=other_body_id if other_body_id >= 0 else None,
-            linkIndexA=link_index,
-        )
+        if other_body_id >= 0:
+            contact_points = p.getContactPoints(
+                bodyA=self.robot_id,
+                bodyB=other_body_id,
+                linkIndexA=link_index,
+            )
+        else:
+            contact_points = p.getContactPoints(
+                bodyA=self.robot_id,
+                linkIndexA=link_index,
+            )
         normal_force = sum(cp[9] for cp in contact_points)
         return len(contact_points) > 0, normal_force
