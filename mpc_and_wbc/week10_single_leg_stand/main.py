@@ -8,7 +8,8 @@ import pybullet_data
 from config import (
     DT_SIM, WBC_FREQ, MPC_FREQ, SIM_DURATION,
     URDF_PATH, INITIAL_POSE, LIFT_LEG, LIFT_TIME, H_COM,
-    FOOT_LINK_NAMES,
+    FOOT_LINK_NAMES, STANDING_JOINT_ANGLES,
+    BASE_INITIAL_POS, BASE_INITIAL_ORN,
     NX, NU, N_HORIZON, T_S, GRAVITY, MU,
     RMSE_THRESH, SLIP_THRESH, MPC_TIME_THRESH, WBC_TIME_THRESH,
 )
@@ -38,8 +39,30 @@ def main():
     ]
     estimator = StateEstimator(robot, candidate_foot_links)
 
-    # TODO: 设置初始姿势（双脚站立）
-    # robot.reset_joint_positions(...)
+    # -----------------------------------------------------------------
+    # 设置初始姿势（双脚站立）
+    # -----------------------------------------------------------------
+    robot.reset_base_pose(BASE_INITIAL_POS, BASE_INITIAL_ORN)
+
+    # 按关节名构造初始角度数组
+    initial_dof_angles = np.zeros(len(robot.dof_joints))
+    for idx, joint_idx in enumerate(robot.dof_joints):
+        joint_name = robot.joint_info[joint_idx][1].decode('utf-8')
+        if joint_name in STANDING_JOINT_ANGLES:
+            initial_dof_angles[idx] = STANDING_JOINT_ANGLES[joint_name]
+
+    robot.reset_joint_positions(initial_dof_angles)
+
+    # 设置所有自由度关节为力矩控制模式（重置后 PyBullet 默认是 position control）
+    for joint_idx in robot.dof_joints:
+        p.setJointMotorControl2(
+            robot.robot_id, joint_idx,
+            p.VELOCITY_CONTROL, targetVelocity=0, force=0
+        )
+        p.setJointMotorControl2(
+            robot.robot_id, joint_idx,
+            p.TORQUE_CONTROL, force=0
+        )
 
     # =====================================================================
     # 3. 初始化控制器

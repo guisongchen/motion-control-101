@@ -325,10 +325,12 @@ class RobotModel:
     # 辅助
     # -----------------------------------------------------------------------
     def reset_joint_positions(self, joint_positions: np.ndarray):
-        """重置关节位置。"""
-        n = min(len(joint_positions), self.num_joints)
-        for i in range(n):
-            p.resetJointState(self.robot_id, i, float(joint_positions[i]))
+        """重置自由度关节位置（跳过固定关节）。"""
+        for idx, joint_idx in enumerate(self.dof_joints):
+            if idx < len(joint_positions):
+                p.resetJointState(
+                    self.robot_id, joint_idx, float(joint_positions[idx])
+                )
 
     def reset_base_pose(self, position: np.ndarray, orientation: np.ndarray):
         """重置基座位姿。"""
