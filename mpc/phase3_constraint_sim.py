@@ -3,9 +3,11 @@ Phase 3: Constraint comparison experiments — LQR (saturated) vs MPC (constrain
 
 Initial condition: theta0 = 0.3 rad (larger disturbance).
 Control bounds: u_min = -5 N, u_max = +5 N.
+Control rate limit (MPC only): du_max = 2 N/step (200 N/s).
 
 LQR: standard LQR gain with naive clipping (saturation).
-MPC: explicit box constraints inside OSQP optimization.
+MPC-control: explicit box constraints inside OSQP optimization.
+MPC-rate: box constraints + control rate limits (|du/dt| <= 200 N/s).
 """
 
 import sys
@@ -33,7 +35,7 @@ def _detect_saturation_steps(u_hist: np.ndarray, bound: float, tol: float = 1e-6
     return int(np.sum(np.abs(u_hist) >= bound - tol))
 
 
-def _is_stable(theta_hist: np.ndarray, t_hist: np.ndarray, threshold: float = 0.8) -> bool:
+def _is_stable(theta_hist: np.ndarray, threshold: float = 0.8) -> bool:
     """Return False if pole swings beyond threshold (indicating likely failure)."""
     return bool(np.all(np.abs(theta_hist) < threshold))
 
@@ -75,6 +77,7 @@ def run_lqr_saturated(
         viewer_ctx = None
 
     J_cum = 0.0
+    u_prev = 0.0
     for k in range(n_steps):
         x = data.qpos[0]
         theta = data.qpos[1]
@@ -117,6 +120,10 @@ def run_lqr_saturated(
     bound = min(abs(u_min), abs(u_max))
     sat_steps = _detect_saturation_steps(u_hist, bound)
 
+    # Control smoothness: sum of squared differences
+    du = np.diff(u_hist)
+    smoothness = float(np.sum(du ** 2))
+
     return {
         "time": t_hist,
         "state": x_hist,
@@ -131,20 +138,23 @@ def run_lqr_saturated(
         "saturation_steps": sat_steps,
         "saturation_duration": sat_steps * dt,
         "saturation_pct": 100.0 * sat_steps / n_steps,
-        "is_stable": _is_stable(theta, t_hist),
+        "is_stable": _is_stable(theta),
+        "smoothness": smoothness,
     }
 
 
-def run_mpc_constrained(
+def run_mpc(
     xml_path: str | Path,
     duration: float = 5.0,
     theta0: float = 0.3,
     N: int = 20,
     u_min: float = -5.0,
     u_max: float = 5.0,
+    du_max: float | None = None,
+    label: str = "MPC",
     render: bool = False,
 ) -> dict:
-    """MPC with explicit control constraints."""
+    """MPC with explicit control constraints and optional rate limits."""
     xml_path = Path(xml_path)
     model = mujoco.MjModel.from_xml_path(str(xml_path))
     data = mujoco.MjData(model)
@@ -153,7 +163,11 @@ def run_mpc_constrained(
     assert np.isclose(dt, 0.01)
 
     lqr = CartPoleLQR(dt=dt)
-    mpc = CartPoleMPC(Ad=lqr.Ad, Bd=lqr.Bd, N=N, P=lqr.P, u_min=u_min, u_max=u_max)
+    mpc = CartPoleMPC(
+        Ad=lqr.Ad, Bd=lqr.Bd, N=N, P=lqr.P,
+        u_min=u_min, u_max=u_max, du_max=du_max,
+    )
+    mpc.reset()  # ensure u_prev starts at 0
 
     data.qpos[:] = 0.0
     data.qvel[:] = 0.0
@@ -217,6 +231,9 @@ def run_mpc_constrained(
     bound = min(abs(u_min), abs(u_max))
     sat_steps = _detect_saturation_steps(u_hist, bound)
 
+    du = np.diff(u_hist)
+    smoothness = float(np.sum(du ** 2))
+
     return {
         "time": t_hist,
         "state": x_hist,
@@ -232,59 +249,57 @@ def run_mpc_constrained(
         "saturation_steps": sat_steps,
         "saturation_duration": sat_steps * dt,
         "saturation_pct": 100.0 * sat_steps / n_steps,
-        "is_stable": _is_stable(theta, t_hist),
+        "is_stable": _is_stable(theta),
+        "smoothness": smoothness,
         "mean_solve_time_ms": np.mean(solve_time_hist),
         "max_solve_time_ms": np.max(solve_time_hist),
     }
 
 
-def plot_phase3_comparison(
+def plot_comparison(
     lqr_metrics: dict,
     mpc_metrics: dict,
+    mpc_rate_metrics: dict,
     u_min: float = -5.0,
     u_max: float = 5.0,
     save_path: str | Path | None = None,
 ):
-    """Overlay LQR (saturated) vs MPC (constrained) with saturation bands."""
+    """Overlay LQR (saturated) vs MPC (constrained) vs MPC (rate-limited)."""
     t = lqr_metrics["time"]
 
     fig, axes = plt.subplots(3, 1, figsize=(10, 9), sharex=True)
 
-    # --- State ---
+    # State trajectory
     ax = axes[0]
     ax.plot(t, lqr_metrics["state"][:, 0], label="LQR cart x", lw=1.5, color="C0", ls="-")
     ax.plot(t, mpc_metrics["state"][:, 0], label="MPC cart x", lw=1.5, color="C0", ls="--")
+    ax.plot(t, mpc_rate_metrics["state"][:, 0], label="MPC-rate cart x", lw=1.5, color="C0", ls=":")
     ax.plot(t, lqr_metrics["state"][:, 2], label="LQR theta", lw=1.5, color="C1", ls="-")
     ax.plot(t, mpc_metrics["state"][:, 2], label="MPC theta", lw=1.5, color="C1", ls="--")
+    ax.plot(t, mpc_rate_metrics["state"][:, 2], label="MPC-rate theta", lw=1.5, color="C1", ls=":")
     ax.axhline(0.01, color="gray", ls="--", lw=0.8)
     ax.axhline(-0.01, color="gray", ls="--", lw=0.8)
     ax.set_ylabel("state")
-    ax.legend(loc="upper right", ncol=2)
-    ax.set_title("Phase 3: LQR (saturated) vs MPC (constrained) — theta0=0.3 rad")
+    ax.legend(loc="upper right", ncol=3, fontsize=8)
+    ax.set_title("Phase 3: LQR (saturated) vs MPC (constrained) vs MPC (rate-limited) — theta0=0.3 rad")
     ax.grid(True, alpha=0.3)
 
-    # --- Control with saturation bands ---
+    # Control trajectory with saturation bands
     ax = axes[1]
     ax.plot(t, lqr_metrics["control"], label="LQR force", lw=1.5, color="C2", ls="-")
     ax.plot(t, mpc_metrics["control"], label="MPC force", lw=1.5, color="C2", ls="--")
+    ax.plot(t, mpc_rate_metrics["control"], label="MPC-rate force", lw=1.5, color="C2", ls=":")
     ax.axhline(u_max, color="red", ls=":", lw=1.0, alpha=0.7, label=f"saturation ±{abs(u_max)} N")
     ax.axhline(u_min, color="red", ls=":", lw=1.0, alpha=0.7)
-
-    # Highlight saturation regions
-    bound = min(abs(u_min), abs(u_max))
-    lqr_sat = np.abs(lqr_metrics["control"]) >= bound - 1e-6
-    mpc_sat = np.abs(mpc_metrics["control"]) >= bound - 1e-6
-    ax.fill_between(t, u_min, u_max, where=lqr_sat, color="C2", alpha=0.15, label="LQR sat")
-    ax.fill_between(t, u_min, u_max, where=mpc_sat, color="C2", alpha=0.15, label="MPC sat")
-
     ax.set_ylabel("control [N]")
     ax.legend(loc="upper right", ncol=2)
     ax.grid(True, alpha=0.3)
 
-    # --- Cumulative cost ---
+    # Cumulative cost
     ax = axes[2]
     ax.plot(t, lqr_metrics["cost"], label="LQR J", lw=1.5, color="C3", ls="-")
     ax.plot(t, mpc_metrics["cost"], label="MPC J", lw=1.5, color="C3", ls="--")
+    ax.plot(t, mpc_rate_metrics["cost"], label="MPC-rate J", lw=1.5, color="C3", ls=":")
     ax.set_xlabel("time [s]")
     ax.set_ylabel("cumulative cost")
     ax.legend(loc="lower right")
@@ -299,23 +314,22 @@ def plot_phase3_comparison(
         plt.show()
 
 
-def print_phase3_comparison(lqr_metrics: dict, mpc_metrics: dict):
-    print("\n=== Phase 3 Comparison: LQR (saturated) vs MPC (constrained) ===")
-    print(f"{'Metric':<35} {'LQR':>14} {'MPC':>14}")
-    print("-" * 63)
-    print(f"{'Settling time (s)':<35} {str(lqr_metrics['settling_time']):>14} {str(mpc_metrics['settling_time']):>14}")
-    print(f"{'Overshoot (rad)':<35} {lqr_metrics['overshoot_rad']:>14.4f} {mpc_metrics['overshoot_rad']:>14.4f}")
-    print(f"{'Max |force| (N)':<35} {lqr_metrics['max_force']:>14.3f} {mpc_metrics['max_force']:>14.3f}")
-    print(f"{'Final theta (rad)':<35} {lqr_metrics['final_theta']:>14.6f} {mpc_metrics['final_theta']:>14.6f}")
-    print(f"{'Final x (m)':<35} {lqr_metrics['final_x']:>14.6f} {mpc_metrics['final_x']:>14.6f}")
-    print(f"{'Final cost J':<35} {lqr_metrics['cost'][-1]:>14.3f} {mpc_metrics['cost'][-1]:>14.3f}")
-    print(f"{'Saturation steps':<35} {lqr_metrics['saturation_steps']:>14} {mpc_metrics['saturation_steps']:>14}")
-    print(f"{'Saturation duration (s)':<35} {lqr_metrics['saturation_duration']:>14.3f} {mpc_metrics['saturation_duration']:>14.3f}")
-    print(f"{'Saturation %':<35} {lqr_metrics['saturation_pct']:>14.1f} {mpc_metrics['saturation_pct']:>14.1f}")
-    print(f"{'Stable?':<35} {str(lqr_metrics['is_stable']):>14} {str(mpc_metrics['is_stable']):>14}")
-    print(f"{'Mean solve time (ms)':<35} {'—':>14} {mpc_metrics['mean_solve_time_ms']:>14.3f}")
-    print(f"{'Max solve time (ms)':<35} {'—':>14} {mpc_metrics['max_solve_time_ms']:>14.3f}")
-    print("=================================================================\n")
+def print_comparison(lqr_metrics: dict, mpc_metrics: dict, mpc_rate_metrics: dict):
+    print("\n=== Phase 3 Comparison ===")
+    print(f"{'Metric':<35} {'LQR':>14} {'MPC':>14} {'MPC-rate':>14}")
+    print("-" * 77)
+    print(f"{'Settling time (s)':<35} {str(lqr_metrics['settling_time']):>14} {str(mpc_metrics['settling_time']):>14} {str(mpc_rate_metrics['settling_time']):>14}")
+    print(f"{'Overshoot (rad)':<35} {lqr_metrics['overshoot_rad']:>14.4f} {mpc_metrics['overshoot_rad']:>14.4f} {mpc_rate_metrics['overshoot_rad']:>14.4f}")
+    print(f"{'Max |force| (N)':<35} {lqr_metrics['max_force']:>14.3f} {mpc_metrics['max_force']:>14.3f} {mpc_rate_metrics['max_force']:>14.3f}")
+    print(f"{'Final theta (rad)':<35} {lqr_metrics['final_theta']:>14.6f} {mpc_metrics['final_theta']:>14.6f} {mpc_rate_metrics['final_theta']:>14.6f}")
+    print(f"{'Final x (m)':<35} {lqr_metrics['final_x']:>14.6f} {mpc_metrics['final_x']:>14.6f} {mpc_rate_metrics['final_x']:>14.6f}")
+    print(f"{'Final cost J':<35} {lqr_metrics['cost'][-1]:>14.3f} {mpc_metrics['cost'][-1]:>14.3f} {mpc_rate_metrics['cost'][-1]:>14.3f}")
+    print(f"{'Saturation steps':<35} {lqr_metrics['saturation_steps']:>14} {mpc_metrics['saturation_steps']:>14} {mpc_rate_metrics['saturation_steps']:>14}")
+    print(f"{'Saturation duration (s)':<35} {lqr_metrics['saturation_duration']:>14.3f} {mpc_metrics['saturation_duration']:>14.3f} {mpc_rate_metrics['saturation_duration']:>14.3f}")
+    print(f"{'Control smoothness (sum du^2)':<35} {lqr_metrics['smoothness']:>14.3f} {mpc_metrics['smoothness']:>14.3f} {mpc_rate_metrics['smoothness']:>14.3f}")
+    print(f"{'Stable?':<35} {str(lqr_metrics['is_stable']):>14} {str(mpc_metrics['is_stable']):>14} {str(mpc_rate_metrics['is_stable']):>14}")
+    print(f"{'Mean solve time (ms)':<35} {'—':>14} {mpc_metrics['mean_solve_time_ms']:>14.3f} {mpc_rate_metrics['mean_solve_time_ms']:>14.3f}")
+    print("===========================================================================\n")
 
 
 if __name__ == "__main__":
@@ -327,18 +341,23 @@ if __name__ == "__main__":
     theta0 = 0.3
     N = 20
     u_min, u_max = -5.0, 5.0
+    du_max = 2.0  # 2 N per 0.01s step = 200 N/s rate limit
 
     print(f"Running LQR with saturation (theta0={theta0} rad, bounds=[{u_min}, {u_max}])...")
     lqr_metrics = run_lqr_saturated(xml_path, duration=duration, theta0=theta0, u_min=u_min, u_max=u_max)
 
     print(f"Running MPC with constraints (theta0={theta0} rad, N={N}, bounds=[{u_min}, {u_max}])...")
-    mpc_metrics = run_mpc_constrained(xml_path, duration=duration, theta0=theta0, N=N, u_min=u_min, u_max=u_max)
+    mpc_metrics = run_mpc(xml_path, duration=duration, theta0=theta0, N=N, u_min=u_min, u_max=u_max, label="MPC")
 
-    print_phase3_comparison(lqr_metrics, mpc_metrics)
+    print(f"Running MPC with rate limits (theta0={theta0} rad, N={N}, bounds=[{u_min}, {u_max}], du_max={du_max})...")
+    mpc_rate_metrics = run_mpc(xml_path, duration=duration, theta0=theta0, N=N, u_min=u_min, u_max=u_max, du_max=du_max, label="MPC-rate")
 
-    plot_phase3_comparison(
+    print_comparison(lqr_metrics, mpc_metrics, mpc_rate_metrics)
+
+    plot_comparison(
         lqr_metrics,
         mpc_metrics,
+        mpc_rate_metrics,
         u_min=u_min,
         u_max=u_max,
         save_path=out_dir / "phase3_constraint_comparison.png",

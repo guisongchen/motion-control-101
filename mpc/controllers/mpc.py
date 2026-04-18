@@ -2,7 +2,7 @@
 Linear MPC controller for discrete-time LTI systems.
 
 Phase 2/3: Dense QP formulation with OSQP solver, supporting control
-and state constraints.
+bounds, control rate limits, and state constraints.
 
 Given a discrete-time linear system:
     x(k+1) = A x(k) + B u(k)
@@ -10,6 +10,7 @@ Given a discrete-time linear system:
 Solve at each timestep:
     min_U   sum_{k=0}^{N-1} ||x(k) - x_ref||_Q^2 + ||u(k)||_R^2 + ||x(N)||_P^2
     s.t.    u_min <= u(k) <= u_max          (optional control bounds)
+            |u(k) - u(k-1)| <= du_max      (optional control rate limits)
             lb <= C x(k) <= ub  for k in steps  (optional state constraints)
 
 where U = [u(0); u(1); ...; u(N-1)] is the stacked control sequence.
@@ -42,6 +43,8 @@ class LinearMPC:
         Lower bound on control(s). Scalar or shape (nu,).
     u_max : float | np.ndarray | None
         Upper bound on control(s). Scalar or shape (nu,).
+    du_max : float | np.ndarray | None
+        Max control rate (|u(k) - u(k-1)| <= du_max). Scalar or shape (nu,).
     state_constraints : list[dict] | None
         Each dict keys:
             - 'idx'   : int — state component index to constrain.
@@ -61,6 +64,7 @@ class LinearMPC:
         P: np.ndarray | None = None,
         u_min: float | np.ndarray | None = None,
         u_max: float | np.ndarray | None = None,
+        du_max: float | np.ndarray | None = None,
         state_constraints: list[dict] | None = None,
     ):
         self.Ad = np.asarray(Ad, dtype=float)
@@ -87,6 +91,14 @@ class LinearMPC:
         else:
             self.u_max = None
 
+        # Control rate limits
+        if du_max is not None:
+            self.du_max = np.atleast_1d(np.asarray(du_max, dtype=float))
+            if self.du_max.shape == (1,):
+                self.du_max = np.tile(self.du_max, self.nu)
+        else:
+            self.du_max = None
+
         # State constraints
         self.state_constraints = state_constraints or []
         for sc in self.state_constraints:
@@ -103,6 +115,9 @@ class LinearMPC:
 
         # ---- Setup OSQP ----
         self._setup_osqp()
+
+        # Track previous applied control for rate constraints
+        self._u_prev = np.zeros(self.nu)
 
     def _build_prediction_matrices(self) -> tuple[np.ndarray, np.ndarray]:
         """Build A_pred (N*nx, nx) and B_pred (N*nx, N*nu)."""
@@ -146,8 +161,9 @@ class LinearMPC:
 
         n_vars = self.N * self.nu
         n_ctrl_con = n_vars if (self.u_min is not None or self.u_max is not None) else 0
+        n_rate_con = (self.N - 1) * self.nu if self.du_max is not None else 0
         n_state_con = sum(len(sc["steps"]) for sc in self.state_constraints)
-        n_con = n_ctrl_con + n_state_con
+        n_con = n_ctrl_con + n_rate_con + n_state_con
 
         A_con = np.zeros((n_con, n_vars))
         l = np.full(n_con, -np.inf, dtype=float)
@@ -161,12 +177,24 @@ class LinearMPC:
             if self.u_max is not None:
                 u[:n_vars] = np.tile(self.u_max, self.N)
 
-        # State constraints: lb <= C x(k) <= ub
-        # x(k) = A_pred[k] x0 + B_pred[k] U
-        # => lb - C A_pred[k] x0 <= C B_pred[k] U <= ub - C A_pred[k] x0
-        # C selects one state component -> row vector.
+        # Rate constraints: |u(k) - u(k-1)| <= du_max for k = 1..N-1
+        # u(k) - u(k-1) <= du_max  and  u(k-1) - u(k) <= du_max
+        self._rate_con_start = n_ctrl_con
+        if n_rate_con > 0:
+            for k in range(1, self.N):
+                for j in range(self.nu):
+                    row = n_ctrl_con + (k - 1) * self.nu + j
+                    col_prev = (k - 1) * self.nu + j
+                    col_curr = k * self.nu + j
+                    # u(k) - u(k-1) <= du_max
+                    A_con[row, col_curr] = 1.0
+                    A_con[row, col_prev] = -1.0
+                    u[row] = self.du_max[j]
+                    l[row] = -self.du_max[j]
+
+        # State constraints
         self._state_con_meta = []
-        row = n_ctrl_con
+        row = n_ctrl_con + n_rate_con
         for sc in self.state_constraints:
             idx = sc["idx"]
             lb, ub = sc["lb"], sc["ub"]
@@ -230,22 +258,39 @@ class LinearMPC:
         X_ref = np.tile(x_ref, self.N)
         g = 2 * self.B_pred.T @ self._Q_bar @ (self.A_pred @ x0 - X_ref)
 
-        # Update bounds for state constraints (affine x0 term)
+        # Build bound updates
+        l_new = self._l.copy()
+        u_new = self._u.copy()
+
+        # Rate constraint on u(0): |u(0) - u_prev| <= du_max
+        # This tightens the control bounds on the first step
+        if self.du_max is not None and self.N > 0:
+            for j in range(self.nu):
+                idx = j  # first control element
+                if self.u_min is not None:
+                    l_new[idx] = max(l_new[idx], self._u_prev[j] - self.du_max[j])
+                else:
+                    l_new[idx] = self._u_prev[j] - self.du_max[j]
+                if self.u_max is not None:
+                    u_new[idx] = min(u_new[idx], self._u_prev[j] + self.du_max[j])
+                else:
+                    u_new[idx] = self._u_prev[j] + self.du_max[j]
+
+        # State constraints: update affine x0 term
         if self._state_con_meta:
-            l_new = self._l.copy()
-            u_new = self._u.copy()
             for meta in self._state_con_meta:
                 offset = float(self.A_pred[meta["A_row_idx"], :] @ x0)
                 l_new[meta["con_row_idx"]] -= offset
                 u_new[meta["con_row_idx"]] -= offset
-            self.solver.update(q=g, l=l_new, u=u_new)
-        else:
-            self.solver.update(q=g)
 
+        self.solver.update(q=g, l=l_new, u=u_new)
         result = self.solver.solve()
 
         U_opt = result.x
         u0 = U_opt[: self.nu]
+
+        # Update previous control for next timestep
+        self._u_prev = np.array(u0)
 
         # Predicted states for analysis
         X_pred = self.A_pred @ x0 + self.B_pred @ U_opt
@@ -260,6 +305,10 @@ class LinearMPC:
         }
 
         return float(u0.item()) if self.nu == 1 else u0, info
+
+    def reset(self):
+        """Reset internal state (e.g., u_prev) for a fresh simulation."""
+        self._u_prev = np.zeros(self.nu)
 
     def print_matrices(self):
         """Print MPC matrices for verification."""
@@ -289,6 +338,7 @@ class CartPoleMPC(LinearMPC):
         P: np.ndarray | None = None,
         u_min: float | None = None,
         u_max: float | None = None,
+        du_max: float | None = None,
         state_constraints: list[dict] | None = None,
     ):
         if Q is None:
@@ -313,6 +363,7 @@ class CartPoleMPC(LinearMPC):
             P=P,
             u_min=u_min,
             u_max=u_max,
+            du_max=du_max,
             state_constraints=state_constraints,
         )
 
