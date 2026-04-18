@@ -1,14 +1,16 @@
 """
 Linear MPC controller for discrete-time LTI systems.
 
-Phase 2: Dense QP formulation with OSQP solver.
+Phase 2/3: Dense QP formulation with OSQP solver, supporting control
+and state constraints.
 
 Given a discrete-time linear system:
     x(k+1) = A x(k) + B u(k)
 
 Solve at each timestep:
     min_U   sum_{k=0}^{N-1} ||x(k) - x_ref||_Q^2 + ||u(k)||_R^2 + ||x(N)||_P^2
-    s.t.    u_min <= u(k) <= u_max    (optional control bounds)
+    s.t.    u_min <= u(k) <= u_max          (optional control bounds)
+            lb <= C x(k) <= ub  for k in steps  (optional state constraints)
 
 where U = [u(0); u(1); ...; u(N-1)] is the stacked control sequence.
 """
@@ -40,6 +42,13 @@ class LinearMPC:
         Lower bound on control(s). Scalar or shape (nu,).
     u_max : float | np.ndarray | None
         Upper bound on control(s). Scalar or shape (nu,).
+    state_constraints : list[dict] | None
+        Each dict keys:
+            - 'idx'   : int — state component index to constrain.
+            - 'lb'    : float — lower bound on that component.
+            - 'ub'    : float — upper bound on that component.
+            - 'steps' : list[int] | 'all' — prediction steps (1-indexed).
+                        Default 'all' means k = 1 .. N.
     """
 
     def __init__(
@@ -52,6 +61,7 @@ class LinearMPC:
         P: np.ndarray | None = None,
         u_min: float | np.ndarray | None = None,
         u_max: float | np.ndarray | None = None,
+        state_constraints: list[dict] | None = None,
     ):
         self.Ad = np.asarray(Ad, dtype=float)
         self.Bd = np.asarray(Bd, dtype=float)
@@ -77,10 +87,15 @@ class LinearMPC:
         else:
             self.u_max = None
 
+        # State constraints
+        self.state_constraints = state_constraints or []
+        for sc in self.state_constraints:
+            if "steps" not in sc or sc["steps"] == "all":
+                sc["steps"] = list(range(1, N + 1))
+            else:
+                sc["steps"] = list(sc["steps"])
+
         # ---- Build prediction matrices ----
-        # X = A_pred @ x0 + B_pred @ U
-        # X = [x(1); x(2); ...; x(N)]  shape (N*nx,)
-        # U = [u(0); u(1); ...; u(N-1)]  shape (N*nu,)
         self.A_pred, self.B_pred = self._build_prediction_matrices()
 
         # ---- Build cost matrices ----
@@ -95,13 +110,10 @@ class LinearMPC:
         A_pred = np.zeros((N * nx, nx))
         B_pred = np.zeros((N * nx, N * nu))
 
-        # Fill row by row
         for i in range(N):
-            # A^(i+1)
             A_power = np.linalg.matrix_power(self.Ad, i + 1)
             A_pred[i * nx : (i + 1) * nx, :] = A_power
 
-            # B_pred block row i: [A^i B, A^(i-1) B, ..., B, 0, ...]
             for j in range(i + 1):
                 A_pwr = np.linalg.matrix_power(self.Ad, i - j)
                 B_pred[
@@ -111,21 +123,13 @@ class LinearMPC:
         return A_pred, B_pred
 
     def _build_cost_matrices(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """
-        Build H = 2*(B_pred^T Q_bar B_pred + R_bar).
-
-        Returns H, Q_bar, R_bar.
-        """
         nx, nu, N = self.nx, self.nu, self.N
 
-        # Q_bar: block diag(Q, Q, ..., P)
-        # First N-1 blocks are Q, last block is P
         Q_bar = np.zeros((N * nx, N * nx))
         for i in range(N - 1):
             Q_bar[i * nx : (i + 1) * nx, i * nx : (i + 1) * nx] = self.Q
         Q_bar[(N - 1) * nx : N * nx, (N - 1) * nx : N * nx] = self.P
 
-        # R_bar: block diag(R, R, ..., R)
         R_bar = np.zeros((N * nu, N * nu))
         for i in range(N):
             R_bar[i * nu : (i + 1) * nu, i * nu : (i + 1) * nu] = self.R
@@ -140,34 +144,61 @@ class LinearMPC:
         P_sparse = sp.csc_matrix(self.H)
         q = np.zeros(self.N * self.nu)
 
-        # Constraints: control bounds on each element of U
-        # OSQP form: l <= A_con z <= u
         n_vars = self.N * self.nu
-        if self.u_min is not None or self.u_max is not None:
-            A_con = sp.eye(n_vars, format="csc")
-            l = np.full(n_vars, -np.inf, dtype=float)
-            u = np.full(n_vars, np.inf, dtype=float)
+        n_ctrl_con = n_vars if (self.u_min is not None or self.u_max is not None) else 0
+        n_state_con = sum(len(sc["steps"]) for sc in self.state_constraints)
+        n_con = n_ctrl_con + n_state_con
 
+        A_con = np.zeros((n_con, n_vars))
+        l = np.full(n_con, -np.inf, dtype=float)
+        u = np.full(n_con, np.inf, dtype=float)
+
+        # Control bounds
+        if n_ctrl_con > 0:
+            A_con[:n_vars, :] = np.eye(n_vars)
             if self.u_min is not None:
-                l[:] = np.tile(self.u_min, self.N)
+                l[:n_vars] = np.tile(self.u_min, self.N)
             if self.u_max is not None:
-                u[:] = np.tile(self.u_max, self.N)
+                u[:n_vars] = np.tile(self.u_max, self.N)
+
+        # State constraints: lb <= C x(k) <= ub
+        # x(k) = A_pred[k] x0 + B_pred[k] U
+        # => lb - C A_pred[k] x0 <= C B_pred[k] U <= ub - C A_pred[k] x0
+        # C selects one state component -> row vector.
+        self._state_con_meta = []
+        row = n_ctrl_con
+        for sc in self.state_constraints:
+            idx = sc["idx"]
+            lb, ub = sc["lb"], sc["ub"]
+            for step in sc["steps"]:
+                flat_row = (step - 1) * self.nx + idx
+                A_con[row, :] = self.B_pred[flat_row, :]
+                l[row] = lb
+                u[row] = ub
+                self._state_con_meta.append({
+                    "A_row_idx": flat_row,
+                    "con_row_idx": row,
+                })
+                row += 1
+
+        if n_con > 0:
+            A_sparse = sp.csc_matrix(A_con)
         else:
-            A_con = sp.csc_matrix((0, n_vars))
+            A_sparse = sp.csc_matrix((0, n_vars))
             l = np.array([])
             u = np.array([])
 
         self.solver.setup(
             P=P_sparse,
             q=q,
-            A=A_con,
+            A=A_sparse,
             l=l,
             u=u,
             verbose=False,
             polish=False,
             warm_start=True,
         )
-        self._A_con = A_con
+        self._A_con = A_sparse
         self._l = l
         self._u = u
 
@@ -195,12 +226,22 @@ class LinearMPC:
         else:
             x_ref = np.asarray(x_ref, dtype=float).reshape(self.nx)
 
-        # Build gradient: g = 2 * B_pred^T @ Q_bar @ (A_pred @ x0 - X_ref)
+        # Gradient
         X_ref = np.tile(x_ref, self.N)
         g = 2 * self.B_pred.T @ self._Q_bar @ (self.A_pred @ x0 - X_ref)
 
-        # Update and solve
-        self.solver.update(q=g)
+        # Update bounds for state constraints (affine x0 term)
+        if self._state_con_meta:
+            l_new = self._l.copy()
+            u_new = self._u.copy()
+            for meta in self._state_con_meta:
+                offset = float(self.A_pred[meta["A_row_idx"], :] @ x0)
+                l_new[meta["con_row_idx"]] -= offset
+                u_new[meta["con_row_idx"]] -= offset
+            self.solver.update(q=g, l=l_new, u=u_new)
+        else:
+            self.solver.update(q=g)
+
         result = self.solver.solve()
 
         U_opt = result.x
@@ -248,6 +289,7 @@ class CartPoleMPC(LinearMPC):
         P: np.ndarray | None = None,
         u_min: float | None = None,
         u_max: float | None = None,
+        state_constraints: list[dict] | None = None,
     ):
         if Q is None:
             Q = np.diag([1.0, 0.1, 10.0, 0.1])
@@ -271,6 +313,7 @@ class CartPoleMPC(LinearMPC):
             P=P,
             u_min=u_min,
             u_max=u_max,
+            state_constraints=state_constraints,
         )
 
 
