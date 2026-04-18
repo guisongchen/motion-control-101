@@ -92,6 +92,7 @@ $$
 - OSQP 要求问题形式：$\min \frac{1}{2} z^\top P z + q^\top z$ s.t. $l \leq Az \leq u$
 - 需要把变量 $z$ 设为 $U$（控制序列），或扩展为 $[X; U]$（状态+控制序列）
 - 建议：先只用 $U$ 作为优化变量（稠密形式），约束通过 $\mathcal{A}, \mathcal{B}$ 映射到状态
+- **注意**：OSQP 默认容差 `eps_abs=1e-3, eps_rel=1e-3` 对 MPC 来说太松。容器差容忍度不够会导致约束添加后产生数值误差并放大。建议设置为 `eps_abs=1e-9, eps_rel=1e-9` 级别。
 
 2.4 滚动 MPC 闭环仿真
 
@@ -105,6 +106,8 @@ $$
 初始条件：与 Phase 1.3 相同（$\theta_0 = 0.1$ rad）。
 
 对比实验：在同一初始条件下分别运行 LQR 和 MPC，记录相同指标。
+
+**实现发现**：对于 cart-pole 这种线性系统 + 纯输入约束的场景，unconstrained MPC（$P$ 设为离散 ARE 解）与 LQR 在仿真中会给出完全一致的控制序列。这是因为 LQR 已经是无约束最优解，而 MPC 在 $N$ 足够大且 $P$ 匹配时收敛到相同结果。
 
 ---
 Phase 3：约束对比实验（核心）
@@ -131,11 +134,28 @@ Phase 3：约束对比实验（核心）
 - 稳定时间（settling time）
 - 是否有 LQR 因为饱和导致失稳/摆杆倒下，而 MPC 仍能恢复的情况？
 
-3.2 加入状态约束（可选进阶）
+**实现发现**：对于 cart-pole 的推力饱和约束，clipped LQR（逐帧截断）恰好与 MPC 给出相同的控制序列。这是因为输入约束下，LQR 的贪心截断已经是该系统的最优策略。为了体现 MPC 的规划优势，需要引入**LQR 无法处理的多时刻耦合约束**，例如控制速率限制。
 
-尝试加入摆角约束 $|\theta| \leq 0.5$ rad，观察 MPC 是否能在摆杆偏离较大时主动「限制」摆动幅度。
+3.2 控制速率约束（MPC 独有）
 
-注意：状态约束需要通过 $\mathcal{A} x_0 + \mathcal{B} U$ 映射为对 $U$ 的线性约束。
+MPC 可以显式加入控制速率约束：
+$$|u(k) - u(k-1)| \leq du_{\max}$$
+
+在 OSQP 中化为：
+$$-du_{\max} \leq u(k) - u(k-1) \leq du_{\max}$$
+
+对应每一对相邻控制变量之间的线性约束。
+
+实验：$du_{\max} = 2$ N/步 = 200 N/s，对比：
+- MPC-control（仅输入约束）
+- MPC-rate（输入约束 + 速率约束）
+
+3.3 加入状态约束（可选进阶）
+
+尝试加入状态约束，例如摆角速度约束：
+$$|\dot{\theta}| \leq 0.25 \text{ rad/s}$$
+
+**注意**：状态约束需要通过 $\mathcal{A} x_0 + \mathcal{B} U$ 映射为对 $U$ 的线性约束。由于系统是 underactuated 的，过紧的状态约束可能导致问题 primal infeasible。验证约束是否可行的方法：先跑 unconstrained MPC，检查预测轨迹的最大值，选择略小于该值的约束限制。例如 theta0=0.2 时 unconstrained 的 max |theta_dot| = 0.55 rad/s，取 0.25 rad/s 能保证约束活跃且可行。
 
 ---
 Phase 4：预测时域 N 的 Trade-off 分析
@@ -184,10 +204,11 @@ Phase 4：预测时域 N 的 Trade-off 分析
 
 完成实验后，你应该拥有：
 
-- [ ] 手写推导的 $A_d, B_d, \mathcal{A}, \mathcal{B}, H, g$（纸质或 Markdown）
-- [ ] 独立的 LQR 控制器模块
-- [ ] 独立的 MPC 控制器模块（可配置 $N, Q, R, P$）
-- [ ] 带约束/不带约束的对比实验脚本
+- [x] 手写推导的 $A_d, B_d, \mathcal{A}, \mathcal{B}, H, g$（纸质或 Markdown）
+- [x] 独立的 LQR 控制器模块 (`mpc/controllers/lqr.py`)
+- [x] 独立的 MPC 控制器模块（可配置 $N, Q, R, P$，支持控制约束和状态约束）（`mpc/controllers/mpc.py`）
+- [x] 带约束/不带约束的对比实验脚本（`mpc/phase3_constraint_sim.py`）
+- [x] 状态约束对比实验脚本（`mpc/phase3_2_state_constraint_sim.py`）
 - [ ] N 的 trade-off 扫参脚本
 - [ ] 结果图表与分析笔记
 
