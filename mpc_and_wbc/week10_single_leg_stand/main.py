@@ -8,7 +8,7 @@ import pybullet_data
 from config import (
     DT_SIM, WBC_FREQ, MPC_FREQ, SIM_DURATION,
     URDF_PATH, INITIAL_POSE, LIFT_LEG, LIFT_TIME, H_COM,
-    SUPPORT_FOOT_NAME,
+    FOOT_LINK_NAMES,
     NX, NU, N_HORIZON, T_S, GRAVITY, MU,
     RMSE_THRESH, SLIP_THRESH, MPC_TIME_THRESH, WBC_TIME_THRESH,
 )
@@ -33,8 +33,10 @@ def main():
     # 2. 加载机器人
     # =====================================================================
     robot = RobotModel(URDF_PATH)
-    support_foot_link = robot.link_name_to_index[SUPPORT_FOOT_NAME]
-    estimator = StateEstimator(robot, support_foot_link)
+    candidate_foot_links = [
+        robot.link_name_to_index[name] for name in FOOT_LINK_NAMES
+    ]
+    estimator = StateEstimator(robot, candidate_foot_links)
 
     # TODO: 设置初始姿势（双脚站立）
     # robot.reset_joint_positions(...)
@@ -88,6 +90,7 @@ def main():
         L = state["L"]
         q = state["q"]
         v = state["v"]
+        support_foot_link = state["support_foot_link"]
         x0 = np.concatenate([c, c_dot, L])
 
         # -----------------------------------------------------------------

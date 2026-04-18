@@ -335,3 +335,24 @@ class RobotModel:
         p.resetBasePositionAndOrientation(
             self.robot_id, position.tolist(), orientation.tolist()
         )
+
+    def check_contact(self, link_index: int, other_body_id: int = -1) -> tuple:
+        """
+        检测指定 link 是否与目标 body 接触。
+
+        Args:
+            link_index: 待检测的 link 索引（-1 为基座）
+            other_body_id: 目标 body ID，默认 -1 表示与所有 body 检测
+
+        Returns:
+            (is_contact: bool, normal_force: float)
+            is_contact: 是否存在接触点
+            normal_force: 所有接触点的法向力之和 [N]
+        """
+        contact_points = p.getContactPoints(
+            bodyA=self.robot_id,
+            bodyB=other_body_id if other_body_id >= 0 else None,
+            linkIndexA=link_index,
+        )
+        normal_force = sum(cp[9] for cp in contact_points)
+        return len(contact_points) > 0, normal_force
