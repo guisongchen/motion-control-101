@@ -21,6 +21,10 @@ LIFT_LEG = "left"             # t=0.5s 抬起的腿
 LIFT_TIME = 0.5               # 抬腿时刻 [s]
 H_COM = 0.8                   # 期望 CoM 高度 [m]（相对于支撑足）
 
+# 支撑足 / 摆动足 link 名称（用于 StateEstimator 和 WBC）
+SUPPORT_FOOT_NAME = "right_ankle_roll_link"
+SWING_FOOT_NAME = "left_ankle_roll_link"
+
 # ---------------------------------------------------------------------------
 # MPC 参数
 # ---------------------------------------------------------------------------

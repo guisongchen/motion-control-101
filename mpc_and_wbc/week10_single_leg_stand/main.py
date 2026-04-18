@@ -8,6 +8,7 @@ import pybullet_data
 from config import (
     DT_SIM, WBC_FREQ, MPC_FREQ, SIM_DURATION,
     URDF_PATH, INITIAL_POSE, LIFT_LEG, LIFT_TIME, H_COM,
+    SUPPORT_FOOT_NAME,
     NX, NU, N_HORIZON, T_S, GRAVITY, MU,
     RMSE_THRESH, SLIP_THRESH, MPC_TIME_THRESH, WBC_TIME_THRESH,
 )
@@ -32,7 +33,8 @@ def main():
     # 2. 加载机器人
     # =====================================================================
     robot = RobotModel(URDF_PATH)
-    estimator = StateEstimator(robot)
+    support_foot_link = robot.link_name_to_index[SUPPORT_FOOT_NAME]
+    estimator = StateEstimator(robot, support_foot_link)
 
     # TODO: 设置初始姿势（双脚站立）
     # robot.reset_joint_positions(...)
@@ -41,8 +43,7 @@ def main():
     # 3. 初始化控制器
     # =====================================================================
     mpc = CentroidalMPC()
-    # TODO: nv 应从机器人模型获取
-    nv = robot.num_joints + 6
+    nv = robot.nv
     wbc = WholeBodyController(nv)
 
     # MPC 参考轨迹（固定点）
@@ -50,7 +51,7 @@ def main():
     x_ref[2] = H_COM          # z 方向高度
     u_ref = np.zeros(NU)
     # 补偿重力
-    u_ref[2] = -GRAVITY[2] * 10 # TODO: 填入总质量
+    u_ref[2] = -GRAVITY[2] * robot.total_mass
 
     mpc.set_reference(x_ref, u_ref)
 

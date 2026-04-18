@@ -49,6 +49,12 @@ class RobotModel:
             i for i, info in enumerate(self.joint_info)
             if info[2] != p.JOINT_FIXED
         ]
+        # link 名 -> link 索引映射（基座为 -1）
+        self.link_name_to_index = {
+            info[12].decode('utf-8'): i
+            for i, info in enumerate(self.joint_info)
+        }
+        self.link_name_to_index['base'] = -1
         self.nv = 6 + len(self.dof_joints)          # 广义速度维度
         self.nq = 7 + self.num_joints               # 广义位置维度（含所有关节）
 

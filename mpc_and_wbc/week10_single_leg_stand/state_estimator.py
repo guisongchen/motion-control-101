@@ -7,8 +7,14 @@ from robot_model import RobotModel
 class StateEstimator:
     """状态估计器：从 PyBullet 读取原始状态并计算 MPC/WBC 所需量。"""
 
-    def __init__(self, robot: RobotModel):
+    def __init__(self, robot: RobotModel, support_foot_link: int):
+        """
+        Args:
+            robot: RobotModel 实例
+            support_foot_link: 支撑足 link 索引（PyBullet link index）
+        """
         self.robot = robot
+        self.support_foot_link = support_foot_link
 
     def update(self) -> dict:
         """
@@ -21,16 +27,14 @@ class StateEstimator:
                 - L: 质心角动量 (3,)
                 - q: 广义位置
                 - v: 广义速度
-                - p_foot: 支撑足位置 (3,)
+                - p_foot: 支撑足质心位置 (3,)
         """
         q, v = self.robot.get_state()
 
-        c = self.robot.compute_com_position(q)
+        c = self.robot.compute_com_position()
         c_dot = self.robot.compute_com_velocity(q, v)
         L = self.robot.compute_centroidal_momentum(q, v)
-
-        # TODO: 读取支撑足位置
-        p_foot = np.zeros(3)
+        p_foot = self.robot.get_link_com_position(self.support_foot_link)
 
         return {
             "c": c,
