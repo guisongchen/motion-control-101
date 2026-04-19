@@ -53,10 +53,32 @@ def build_direct_pose(
     pose[f"{swing_leg}_hip_roll_joint"] = support_sign * config.DIRECT_SINGLE_SUPPORT_SWING_ROLL_DELTA
     pose[f"{swing_leg}_ankle_roll_joint"] = -support_sign * config.DIRECT_SINGLE_SUPPORT_SWING_ROLL_DELTA
 
+    pose[f"{support_leg}_shoulder_pitch_joint"] = config.DIRECT_SINGLE_SUPPORT_SUPPORT_ARM_SHOULDER_PITCH
+    pose[f"{support_leg}_shoulder_roll_joint"] = (
+        support_sign * config.DIRECT_SINGLE_SUPPORT_SUPPORT_ARM_SHOULDER_ROLL
+    )
+    pose[f"{support_leg}_elbow_joint"] = support_sign * config.DIRECT_SINGLE_SUPPORT_SUPPORT_ARM_ELBOW
+
     q_target = np.zeros(len(joint_names))
     for idx, name in enumerate(joint_names):
         q_target[idx] = pose.get(name, 0.0)
     return q_target
+
+
+def resolve_support_contact_local_position(
+    robot: RobotModel,
+    support_link: int,
+    initial_support_contact: np.ndarray,
+) -> np.ndarray | None:
+    """Pick the foot point whose acceleration WBC constrains to zero."""
+    mode = config.DIRECT_SINGLE_SUPPORT_WBC_CONTACT_POINT
+    if mode == "body_origin":
+        return None
+    if mode == "initial_contact":
+        body_origin = np.array(robot.data.xpos[support_link], copy=True)
+        body_rotation = np.array(robot.data.xmat[support_link]).reshape(3, 3)
+        return body_rotation.T @ (initial_support_contact - body_origin)
+    raise ValueError(f"Unsupported direct single-support contact point mode: {mode}")
 
 
 def run_direct_single_support() -> DirectSingleSupportResult:
@@ -129,9 +151,15 @@ def run_direct_single_support() -> DirectSingleSupportResult:
     print(f"duration: {config.DIRECT_SINGLE_SUPPORT_DURATION:.1f} s")
     print(f"damping scale: {config.DIRECT_SINGLE_SUPPORT_DAMPING_SCALE:.2f}")
     print(f"support blend: {config.DIRECT_SINGLE_SUPPORT_SUPPORT_BLEND:.3f}")
+    print(f"contact point: {config.DIRECT_SINGLE_SUPPORT_WBC_CONTACT_POINT}")
     print("=" * 50)
 
     try:
+        support_contact_local_position = resolve_support_contact_local_position(
+            robot,
+            support_link,
+            initial_support_contact,
+        )
         for step in range(total_steps):
             state = estimator.update(preferred_support_foot_link=support_link, lock_support=True)
             q = state["q"]
@@ -148,7 +176,11 @@ def run_direct_single_support() -> DirectSingleSupportResult:
             )
 
             M = robot.compute_mass_matrix(q)
-            J_c = robot.get_foot_jacobian(support_link, q)
+            J_c = robot.get_foot_jacobian(
+                support_link,
+                q,
+                local_position=support_contact_local_position,
+            )
             J_com = robot.get_com_jacobian(q)
             J_L = robot.get_angular_momentum_jacobian(q)
             c_ddot_des = controller.compute_desired_acceleration(
