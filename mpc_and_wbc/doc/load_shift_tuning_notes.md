@@ -26,8 +26,11 @@ Several new constants were added to `week10_single_leg_stand/config.py`. They ma
 
 - `LOAD_SHIFT_ROLL_DELTA`
 - `PRE_LIFTOFF_EXTRA_ROLL_DELTA`
+- `PRE_LIFTOFF_EXTRA_SWING_PROGRESS`
+- `PRE_LIFTOFF_SWING_KP_SCALE`
+- `PRE_LIFTOFF_SWING_KD_SCALE`
 
-These cap how much support-side body roll is commanded during `LOAD_SHIFT` and `PRE_LIFTOFF`.
+These tune how strongly the controller biases the body toward the support foot and how aggressively `PRE_LIFTOFF` relaxes the swing leg.
 
 Reason:
 
@@ -96,41 +99,45 @@ Reason:
 
 The values were chosen from observed MuJoCo behavior, not from theory alone.
 
-### Roll targets
+### Load-shift and pre-liftoff targets
 
 - `LOAD_SHIFT_ROLL_DELTA = 0.05`
-- `PRE_LIFTOFF_EXTRA_ROLL_DELTA = 0.01`
+- `PRE_LIFTOFF_EXTRA_ROLL_DELTA = 0.002`
+- `PRE_LIFTOFF_EXTRA_SWING_PROGRESS = 0.05`
+- `PRE_LIFTOFF_SWING_KP_SCALE = 0.75`
+- `PRE_LIFTOFF_SWING_KD_SCALE = 0.85`
 
-These are moderate values:
+These are intentionally gentle values:
 
-- larger roll commands transferred more load, but also caused major swing-foot slip and runaway lean
-- smaller values preserved stability but failed to move load enough
+- larger roll or swing-leg relaxation commands transferred more load, but also caused major swing-foot slip and runaway lean
+- smaller values preserved stability but failed to unload the swing foot at all
 
 ### Force ratio targets
 
-- `LOAD_SHIFT_SUPPORT_RATIO = 0.63`
-- `PRE_LIFTOFF_SUPPORT_RATIO = 0.68`
+- `LOAD_SHIFT_SUPPORT_RATIO = 0.52`
+- `PRE_LIFTOFF_SUPPORT_RATIO = 0.56`
 
 These are above neutral loading, but below the clearly unstable over-lean regime seen during aggressive tests.
 
 ### CoM shift targets
 
-- `LOAD_SHIFT_COM_RATIO = 0.35`
-- `PRE_LIFTOFF_COM_RATIO = 0.40`
+- `LOAD_SHIFT_COM_RATIO = 0.16`
+- `PRE_LIFTOFF_COM_RATIO = 0.20`
 
 These ask for visible support-side migration without demanding an extreme lateral shift.
 
 ### Swing-foot force target
 
-- `PRE_LIFTOFF_SWING_FORCE_MAX = 70.0`
+- `PRE_LIFTOFF_SWING_FORCE_MAX = 110.0`
 
 This means "mostly unloaded" rather than "perfectly detached".
 
 ### Velocity and dwell
 
 - `COM_VEL_READY_THRESH = 0.20`
-- `LOAD_SHIFT_READY_TIME = 0.12`
+- `LOAD_SHIFT_READY_TIME = 0.08`
 - `PRE_LIFTOFF_READY_TIME = 0.10`
+- `PRE_LIFTOFF_TIME = 0.50`
 
 These keep promotion conservative without making the controller wait on fixed long timers.
 
@@ -153,10 +160,11 @@ This is an important change in meaning:
 The current tuning achieves the following on the default 3-second run:
 
 - stable double-support standing remains intact
-- `LOAD_SHIFT` increases support-foot loading and CoM shift without immediately collapsing
-- the controller is intentionally conservative and may remain in `LOAD_SHIFT` if readiness is not satisfied
+- the default 3-second run now reaches `PRE_LIFTOFF` at about `t = 1.93 s`
+- by the end of the default run, swing-foot force drops from about `173 N` to about `125 N`
+- max foot slip stays at about `3.59 mm`, below the `5 mm` threshold
 
-That is preferable to the previous behavior, which advanced into unstable liftoff based only on elapsed time.
+That is preferable to the previous behavior, which either stayed stuck in `LOAD_SHIFT` forever or advanced into unstable liftoff based only on elapsed time.
 
 ## Important caveat
 
