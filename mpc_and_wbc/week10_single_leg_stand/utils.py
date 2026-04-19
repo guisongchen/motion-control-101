@@ -2,9 +2,20 @@
 
 import logging
 import sys
+from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 from typing import List
+
+
+OUTPUT_DIR = Path(__file__).resolve().parent / "output"
+
+
+def _save_figure(fig: plt.Figure, filename: str):
+    """将图像保存到实验 output 目录。"""
+    OUTPUT_DIR.mkdir(exist_ok=True)
+    fig.savefig(OUTPUT_DIR / filename, dpi=150, bbox_inches="tight")
+    plt.close(fig)
 
 
 def build_friction_cone_matrix(mu: float) -> tuple:
@@ -88,7 +99,7 @@ def plot_com_tracking(time_log: List[float],
     axes[-1].set_xlabel("Time [s]")
     fig.suptitle("CoM Tracking")
     plt.tight_layout()
-    plt.show()
+    _save_figure(fig, "com_tracking.png")
 
 
 def plot_contact_force(time_log: List[float],
@@ -110,7 +121,7 @@ def plot_contact_force(time_log: List[float],
     axes[-1].set_xlabel("Time [s]")
     fig.suptitle("Contact Force")
     plt.tight_layout()
-    plt.show()
+    _save_figure(fig, "contact_force.png")
 
 
 def plot_torques(time_log: List[float],
@@ -130,7 +141,7 @@ def plot_torques(time_log: List[float],
     ax.legend(loc="upper right", ncol=max(1, n_dof // 6))
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.show()
+    _save_figure(fig, "joint_torques.png")
 
 
 def compute_rmse(actual: List[np.ndarray], reference: List[np.ndarray]) -> float:
