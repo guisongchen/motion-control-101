@@ -29,21 +29,21 @@ FOOT_LINK_NAMES = [
 SUPPORT_FOOT_NAME = "right_ankle_roll_link" if LIFT_LEG == "left" else "left_ankle_roll_link"
 
 # 初始站立姿态（弧度）
-# 先测试零位姿态，观察稳定性后再微调
+# MuJoCo 下零位姿态会让双足站立非常脆弱；使用轻微屈膝姿态作为默认站立姿态。
 STANDING_JOINT_ANGLES = {
     # 左腿
-    "left_hip_pitch_joint": 0.0,
+    "left_hip_pitch_joint": -0.2,
     "left_hip_roll_joint": 0.0,
     "left_hip_yaw_joint": 0.0,
-    "left_knee_joint": 0.0,
-    "left_ankle_pitch_joint": 0.0,
+    "left_knee_joint": 0.4,
+    "left_ankle_pitch_joint": -0.2,
     "left_ankle_roll_joint": 0.0,
     # 右腿
-    "right_hip_pitch_joint": 0.0,
+    "right_hip_pitch_joint": -0.2,
     "right_hip_roll_joint": 0.0,
     "right_hip_yaw_joint": 0.0,
-    "right_knee_joint": 0.0,
-    "right_ankle_pitch_joint": 0.0,
+    "right_knee_joint": 0.4,
+    "right_ankle_pitch_joint": -0.2,
     "right_ankle_roll_joint": 0.0,
     # 躯干
     "waist_yaw_joint": 0.0,
@@ -61,13 +61,13 @@ STANDING_JOINT_ANGLES = {
 }
 
 # 基座初始位姿
-BASE_INITIAL_POS = np.array([0.0, 0.0, 0.697])      # 零位下 foot-to-base ≈ 0.697 m
+BASE_INITIAL_POS = np.array([0.0, 0.0, 0.76])       # 轻微屈膝站姿下的稳定双脚落地高度
 BASE_INITIAL_ORN = np.array([0.0, 0.0, 0.0, 1.0])   # [qx, qy, qz, qw]
 
 # ---------------------------------------------------------------------------
 # Actuator layer
 # ---------------------------------------------------------------------------
-POSTURE_KP = 200.0
+POSTURE_KP = 80.0
 POSTURE_KD = 12.0
 LIFT_LEG_KP = 120.0
 LIFT_LEG_KD = 8.0
@@ -77,6 +77,8 @@ SWING_HIP_PITCH_TARGET = 0.15
 SWING_KNEE_TARGET = -0.3
 SUPPORT_POINT_FILTER = 0.1
 MIN_SUPPORT_FORCE = 50.0
+BASE_DOF_DAMPING = 5.0
+JOINT_DOF_DAMPING = 10.0
 
 # ---------------------------------------------------------------------------
 # MPC 参数

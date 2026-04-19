@@ -13,7 +13,7 @@ from config import (
     POSTURE_KP, POSTURE_KD, LIFT_LEG_KP, LIFT_LEG_KD,
     TRANSITION_BLEND_TIME, SWING_RAMP_TIME,
     SWING_HIP_PITCH_TARGET, SWING_KNEE_TARGET, SUPPORT_POINT_FILTER,
-    MIN_SUPPORT_FORCE,
+    MIN_SUPPORT_FORCE, BASE_DOF_DAMPING, JOINT_DOF_DAMPING,
 )
 from robot_model import RobotModel
 from state_estimator import StateEstimator
@@ -80,6 +80,8 @@ def main():
     robot = RobotModel(MODEL_PATH)
     robot.model.opt.gravity[:] = GRAVITY
     robot.model.opt.timestep = DT_SIM
+    robot.model.dof_damping[:6] = BASE_DOF_DAMPING
+    robot.model.dof_damping[6:] = JOINT_DOF_DAMPING
     robot.reset_base_pose(BASE_INITIAL_POS, BASE_INITIAL_ORN)
     candidate_foot_links = [
         robot.link_name_to_index[name] for name in FOOT_LINK_NAMES
@@ -312,6 +314,7 @@ def main():
         # -----------------------------------------------------------------
         joint_positions = q[7:]
         joint_velocities = v[6:]
+        C_safe = robot.compute_coriolis_gravity(q, v)
         transition_alpha = 0.0
         if use_mpc_wbc:
             transition_alpha = min(
@@ -331,7 +334,7 @@ def main():
                     SWING_KNEE_TARGET * lift_progress
                 )
 
-        safe_tau = compute_pd_torque(
+        safe_tau = C_safe[6:] + compute_pd_torque(
             initial_dof_angles,
             joint_positions,
             joint_velocities,
@@ -341,14 +344,18 @@ def main():
         )
         if left_leg_dof_indices:
             left_leg_dof_indices_arr = np.array(left_leg_dof_indices, dtype=int)
-            safe_tau[left_leg_dof_indices_arr] = compute_pd_torque(
+            safe_tau[left_leg_dof_indices_arr] = (
+                C_safe[6:][left_leg_dof_indices_arr]
+                + compute_pd_torque(
                 safe_targets[left_leg_dof_indices_arr],
                 joint_positions[left_leg_dof_indices_arr],
                 joint_velocities[left_leg_dof_indices_arr],
                 LIFT_LEG_KP,
                 LIFT_LEG_KD,
                 tau_max_limits[left_leg_dof_indices_arr],
+                )
             )
+        safe_tau = np.clip(safe_tau, tau_min_limits, tau_max_limits)
 
         if not use_mpc_wbc:
             robot.set_joint_torques(safe_tau)
