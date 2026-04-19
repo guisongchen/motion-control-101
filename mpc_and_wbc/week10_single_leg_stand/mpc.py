@@ -76,7 +76,7 @@ class CentroidalMPC:
             A_dok[i, i] = 1.0
 
         # 2) 动力学约束: x_{k+1} - A_d x_k - B_d u_k = d_d
-        #    初始 A_d = 0, B_d = 0，仅保留稀疏结构占位
+        #    用 1.0 占位以保留稀疏结构（dok_matrix 会忽略 0.0）
         for k in range(N):
             row_base = n_init + k * nx
             col_xk = k * nx
@@ -86,12 +86,12 @@ class CentroidalMPC:
             for i in range(nx):
                 # x_{k+1} 系数: +I
                 A_dok[row_base + i, col_xnext + i] = 1.0
-                # x_k 系数: -A_d[i,j]（占位 0）
+                # x_k 系数: 占位（后续会被 -A_d 覆盖）
                 for j in range(nx):
-                    A_dok[row_base + i, col_xk + j] = 0.0
-                # u_k 系数: -B_d[i,j]（占位 0）
+                    A_dok[row_base + i, col_xk + j] = 1.0
+                # u_k 系数: 占位（后续会被 -B_d 覆盖）
                 for j in range(nu):
-                    A_dok[row_base + i, col_uk + j] = 0.0
+                    A_dok[row_base + i, col_uk + j] = 1.0
 
         # 3) 摩擦锥约束: A_fcon @ u_k <= 0
         for k in range(N):
@@ -200,9 +200,20 @@ class CentroidalMPC:
             u[n_init + k * nx : n_init + (k + 1) * nx] = self.d_d
 
         # -----------------------------------------------------------------
-        # 4. 调用 osqp update 并求解
+        # 4. 调用 osqp 求解
+        #    使用 setup() 而非 update(Ax=...) 以避免稀疏模式变化导致的错误
         # -----------------------------------------------------------------
-        self.solver.update(q=q, Ax=A_new.data, l=l, u=u)
+        self.solver.setup(
+            P=self._P,
+            q=q,
+            A=A_new,
+            l=l,
+            u=u,
+            verbose=False,
+            eps_abs=1e-5,
+            eps_rel=1e-5,
+            max_iter=4000,
+        )
         result = self.solver.solve()
 
         if result.info.status_val != 1:  # 1 = OSQP_SOLVED

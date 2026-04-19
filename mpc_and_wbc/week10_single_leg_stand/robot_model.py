@@ -116,14 +116,25 @@ class RobotModel:
         """从完整 v 中提取自由度关节速度。"""
         return [float(v[6 + idx]) for idx in range(len(self.dof_joints))]
 
+    def _get_all_joint_positions(self, q: np.ndarray) -> list:
+        """构造包含所有关节（含固定关节）的位置列表。"""
+        return [float(q[7 + i]) for i in range(self.num_joints)]
+
+    def _get_all_joint_velocities(self, v: np.ndarray) -> list:
+        """构造包含所有关节（含固定关节）的速度列表，固定关节为 0。"""
+        all_vel = [0.0] * self.num_joints
+        for idx, joint_idx in enumerate(self.dof_joints):
+            all_vel[joint_idx] = float(v[6 + idx])
+        return all_vel
+
     # -----------------------------------------------------------------------
     # 动力学计算
     # -----------------------------------------------------------------------
     def compute_mass_matrix(self, q: np.ndarray) -> np.ndarray:
         """计算质量矩阵 M(q)，维度 (nv, nv)。"""
         joint_positions = self._get_dof_positions(q)
-        M, _ = p.calculateMassMatrix(self.robot_id, joint_positions)
-        return np.array(M)
+        result = p.calculateMassMatrix(self.robot_id, joint_positions)
+        return np.array(result)
 
     def compute_coriolis_gravity(self, q: np.ndarray, v: np.ndarray) -> np.ndarray:
         """
@@ -131,14 +142,20 @@ class RobotModel:
 
         通过将加速度设为零调用 calculateInverseDynamics 得到。
         """
-        joint_positions = self._get_dof_positions(q)
-        obj_velocities = self._get_dof_velocities(v)
-        obj_accelerations = [0.0] * len(self.dof_joints)
+        joint_positions = self._get_all_joint_positions(q)
+        obj_velocities = self._get_all_joint_velocities(v)
+        obj_accelerations = [0.0] * self.num_joints
 
-        C = p.calculateInverseDynamics(
-            self.robot_id, joint_positions, obj_velocities, obj_accelerations
-        )
-        return np.array(C)
+        try:
+            C = p.calculateInverseDynamics(
+                self.robot_id, joint_positions, obj_velocities, obj_accelerations
+            )
+            return np.array(C)
+        except Exception:
+            # 浮动基机器人在某些构型下逆动力学计算会失败，回退到重力补偿
+            C = np.zeros(self.nv)
+            C[2] = -self._total_mass * 9.81
+            return C
 
     def compute_com_position(self, q: np.ndarray = None) -> np.ndarray:
         """计算质心 CoM 位置 (3,)。"""

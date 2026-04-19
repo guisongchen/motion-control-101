@@ -17,13 +17,13 @@ class WholeBodyController:
             nv: 广义速度维度 (n+6)
         """
         self.nv = nv
-        self.nf = 3               # 单支撑只有 1 个接触点，3 维力
+        self.nf = 3               # 单支撑只有 1 个接触点，3 维线力
         self.nz = self.nv + self.nf   # 决策变量 z = [v_dot; f]
+        self.n_dof = nv - 6
 
         self.solver = osqp.OSQP()
         self.A_fcon, self.b_fcon = build_friction_cone_matrix(MU)
 
-        # TODO: 初始化 QP
         self._build_qp_matrices()
 
     def _build_qp_matrices(self):
@@ -33,18 +33,61 @@ class WholeBodyController:
             s.t. l <= A z <= u
         其中 z = [v_dot; f]
         """
-        # TODO:
-        #   1. 构造目标函数权重 P, q
-        #      - CoM 跟踪: ||J_c v_dot + Jc_dot v - c_ddot_des||_{W1}
-        #      - 角动量跟踪: ||J_L v_dot - L_dot_des||_{W2}
-        #      - 力参考: ||f - f_ref||_{W3}
-        #      - 最小化加速度: ||v_dot||_{W4}
-        #   2. 构造约束 A, l, u
-        #      - 动力学: M v_dot + C = S^T tau + J_c^T f
-        #      - 无滑动: J_c v_dot + Jc_dot v = 0
-        #      - 摩擦锥: f in K
-        #      - 力矩限幅: tau_min <= S(M v_dot + C - J_c^T f) <= tau_max
-        pass
+        nv, nf, n_dof = self.nv, self.nf, self.n_dof
+        nz = self.nz
+
+        # 约束数
+        n_slip = 3      # 无滑动：接触点线加速度为 0
+        n_fcon = 4      # 摩擦锥
+        n_tau = n_dof   # 力矩限幅（双边）
+        n_constr = n_slip + n_fcon + n_tau
+
+        # P, q 在 solve 中更新
+        self._P = sparse.csc_matrix((nz, nz))
+        self._q = np.zeros(nz)
+
+        # A 用 dok 构造稀疏结构——必须预分配所有 solve 中会用到的非零位置，
+        # 因为 OSQP update(Ax=...) 不允许超过 setup 时的 nnz 数量。
+        A_dok = sparse.dok_matrix((n_constr, nz))
+
+        # 1) 无滑动约束占位 (行 0:3, 列 0:nv)
+        for i in range(3):
+            for j in range(nv):
+                A_dok[i, j] = 1.0
+
+        # 2) 摩擦锥约束 (行 3:7, 列 nv:nv+nf) — 固定
+        for i in range(4):
+            for j in range(nf):
+                A_dok[n_slip + i, nv + j] = self.A_fcon[i, j]
+
+        # 3) 力矩限幅占位 (行 7:7+n_dof, 列 0:nv 和 nv:nz)
+        for i in range(n_dof):
+            for j in range(nv):
+                A_dok[n_slip + n_fcon + i, j] = 1.0
+            for j in range(nf):
+                A_dok[n_slip + n_fcon + i, nv + j] = 1.0
+
+        self._A = A_dok.tocsc()
+
+        # l, u
+        self._l = np.zeros(n_constr)
+        self._u = np.zeros(n_constr)
+
+        # 摩擦锥: l = -inf, u = 0
+        self._l[n_slip : n_slip + n_fcon] = -np.inf
+        self._u[n_slip : n_slip + n_fcon] = 0.0
+
+        self.solver.setup(
+            P=self._P,
+            q=self._q,
+            A=self._A,
+            l=self._l,
+            u=self._u,
+            verbose=False,
+            eps_abs=1e-5,
+            eps_rel=1e-5,
+            max_iter=4000,
+        )
 
     def compute_desired_acceleration(self,
                                      c_ref: np.ndarray, c_est: np.ndarray,
@@ -82,14 +125,104 @@ class WholeBodyController:
 
         Returns:
             result: dict，包含
-                - tau: (n,) 关节力矩
+                - tau: (n_dof,) 关节力矩
                 - f: (3,) 接触力
                 - v_dot: (nv,) 广义加速度
                 - solve_time: 求解耗时 [s]
         """
-        # TODO:
-        #   1. 根据当前动力学量更新 QP 矩阵
-        #   2. 调用 solver.update()
-        #   3. 后验计算 tau = S (M v_dot + C - J_c^T f)
-        #   4. 返回结果
-        pass
+        nv, nf, n_dof = self.nv, self.nf, self.n_dof
+        nz = self.nz
+        n_slip = 3
+        n_fcon = 4
+
+        J_c_lin = J_c[:3, :]  # (3, nv) 线速度 Jacobian
+
+        # -----------------------------------------------------------------
+        # 1. 更新 P, q
+        # -----------------------------------------------------------------
+        W4_mat = W4 * np.eye(nv)
+        P_vv = J_com.T @ W1 @ J_com + J_L.T @ W2 @ J_L + W4_mat
+        P_ff = W3
+        P = sparse.block_diag([P_vv, P_ff], format="csc")
+
+        q_v = -(J_com.T @ W1 @ c_ddot_des + J_L.T @ W2 @ L_dot_des)
+        q_f = -W3 @ f_ref
+        q = np.concatenate([q_v, q_f])
+
+        # -----------------------------------------------------------------
+        # 2. 更新 A 矩阵
+        # -----------------------------------------------------------------
+        A_dok = self._A.todok()
+
+        # 无滑动: J_c_lin v_dot = 0
+        for i in range(3):
+            for j in range(nv):
+                A_dok[i, j] = J_c_lin[i, j]
+
+        # 力矩限幅: S(M v_dot + C - J_c_lin.T @ f) in [tau_min, tau_max]
+        # 等价于: (M v_dot + C - J_c_lin.T @ f)[6:] in [tau_min, tau_max]
+        # A_tau = [M[6:, :], -J_c_lin.T[6:, :]]
+        row_base = n_slip + n_fcon
+        JcT = J_c_lin.T
+        for i in range(n_dof):
+            for j in range(nv):
+                A_dok[row_base + i, j] = M[6 + i, j]
+            for j in range(nf):
+                A_dok[row_base + i, nv + j] = -JcT[6 + i, j]
+
+        A_new = A_dok.tocsc()
+
+        # -----------------------------------------------------------------
+        # 3. 更新 l, u
+        # -----------------------------------------------------------------
+        l = self._l.copy()
+        u = self._u.copy()
+
+        # 无滑动等式: l = u = 0
+        l[:n_slip] = 0.0
+        u[:n_slip] = 0.0
+
+        # 力矩限幅
+        SC = C[6:]
+        tau_ext = (JcT @ f_ref)[6:]  # 近似：用后验项中的 JcT f 的关节部分
+        # 实际上约束是 M v_dot + C - J_c^T f，所以边界是 tau_min - C + J_c^T f 中的已知部分
+        # 但在 OSQP 的 l <= A z <= u 形式中：
+        # A_tau z = M[6:,:] v_dot - J_c^T[6:,:] f
+        # 要求 tau_min <= M v_dot + C - J_c^T f <= tau_max
+        # 即 tau_min - C <= M v_dot - J_c^T f <= tau_max - C
+        l[row_base : row_base + n_dof] = tau_min - SC
+        u[row_base : row_base + n_dof] = tau_max - SC
+
+        # -----------------------------------------------------------------
+        # 4. 求解（使用 setup 避免稀疏模式变化导致的 update 错误）
+        # -----------------------------------------------------------------
+        self.solver.setup(
+            P=P,
+            q=q,
+            A=A_new,
+            l=l,
+            u=u,
+            verbose=False,
+            eps_abs=1e-5,
+            eps_rel=1e-5,
+            max_iter=4000,
+        )
+        result = self.solver.solve()
+
+        if result.info.status_val != 1:
+            return None
+
+        z_opt = result.x
+        v_dot = z_opt[:nv]
+        f = z_opt[nv:]
+
+        # 后验计算关节力矩
+        # tau = S (M v_dot + C - J_c_lin.T @ f)
+        tau = (M @ v_dot + C - JcT @ f)[6:]
+
+        return {
+            "tau": tau,
+            "f": f,
+            "v_dot": v_dot,
+            "solve_time": result.info.run_time,
+        }
