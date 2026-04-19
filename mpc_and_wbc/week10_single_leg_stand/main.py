@@ -20,6 +20,11 @@ from config import (
     MIN_SUPPORT_FORCE, BASE_DOF_DAMPING, JOINT_DOF_DAMPING,
     INIT_SETTLE_TIME, DOUBLE_SUPPORT_READY_TIME, LOAD_SHIFT_TIME,
     PRE_LIFTOFF_TIME, DOUBLE_SUPPORT_MIN_FORCE, PRE_LIFTOFF_SWING_PROGRESS,
+    LOAD_SHIFT_ROLL_DELTA, PRE_LIFTOFF_EXTRA_ROLL_DELTA,
+    LOAD_SHIFT_SUPPORT_RATIO, PRE_LIFTOFF_SUPPORT_RATIO,
+    LOAD_SHIFT_COM_RATIO, PRE_LIFTOFF_COM_RATIO,
+    PRE_LIFTOFF_SWING_FORCE_MAX, COM_VEL_READY_THRESH,
+    LOAD_SHIFT_READY_TIME, PRE_LIFTOFF_READY_TIME,
 )
 from robot_model import RobotModel
 from state_estimator import StateEstimator
@@ -49,6 +54,19 @@ class PhaseState:
     filtered_support_point: np.ndarray
     last_valid_support_tau: Optional[np.ndarray]
     last_wbc_warn_step: int
+
+
+@dataclass
+class LoadShiftMetrics:
+    """Physical readiness indicators for moving from double to single support."""
+
+    support_force: float
+    swing_force: float
+    support_ratio: float
+    com_shift_ratio: float
+    com_speed: float
+    support_slip: float
+    swing_slip: float
 
 
 def skew(v: np.ndarray) -> np.ndarray:
@@ -155,18 +173,154 @@ def compute_swing_progress(phase_state: PhaseState, t: float) -> float:
     return min(1.0, PRE_LIFTOFF_SWING_PROGRESS + (1.0 - PRE_LIFTOFF_SWING_PROGRESS) * single_support_progress)
 
 
+def compute_load_shift_progress(phase_state: PhaseState, t: float) -> float:
+    """Compute normalized load-transfer progress for posture shaping."""
+    if phase_state.phase in (ControlPhase.INIT_SETTLE, ControlPhase.DOUBLE_SUPPORT_HOLD):
+        return 0.0
+    if phase_state.phase == ControlPhase.LOAD_SHIFT:
+        return min(1.0, phase_elapsed(phase_state, t) / max(LOAD_SHIFT_TIME, 1e-6))
+    return 1.0
+
+
+def offset_joint_target(
+    targets: np.ndarray,
+    joint_name_to_dof_idx: dict[str, int],
+    joint_name: str,
+    delta: float,
+) -> None:
+    """Add an offset to one joint target when the joint exists in the model."""
+    if joint_name in joint_name_to_dof_idx:
+        targets[joint_name_to_dof_idx[joint_name]] += delta
+
+
+def apply_roll_shift_offset(
+    targets: np.ndarray,
+    joint_name_to_dof_idx: dict[str, int],
+    support_leg: str,
+    delta: float,
+) -> None:
+    """Lean the body toward the support foot while keeping both feet roughly flat."""
+    support_sign = 1.0 if support_leg == "right" else -1.0
+    roll_delta = support_sign * delta
+    for leg in ("left", "right"):
+        offset_joint_target(targets, joint_name_to_dof_idx, f"{leg}_hip_roll_joint", roll_delta)
+        offset_joint_target(targets, joint_name_to_dof_idx, f"{leg}_ankle_roll_joint", -roll_delta)
+
+
+def compute_load_shift_metrics(
+    c: np.ndarray,
+    c_dot: np.ndarray,
+    foot_contacts: list[dict],
+    support_foot_link: int,
+    swing_foot_link: int,
+    initial_foot_pos: dict[int, np.ndarray],
+) -> LoadShiftMetrics:
+    """Measure whether weight has actually moved onto the intended support foot."""
+    support_contact = get_contact_entry(foot_contacts, support_foot_link)
+    swing_contact = get_contact_entry(foot_contacts, swing_foot_link)
+    support_force = support_contact["normal_force"] if support_contact is not None else 0.0
+    swing_force = swing_contact["normal_force"] if swing_contact is not None else 0.0
+    total_force = max(support_force + swing_force, 1e-6)
+    support_ratio = support_force / total_force
+    support_pos = (
+        support_contact["position"] if support_contact is not None else initial_foot_pos[support_foot_link]
+    )
+    swing_pos = (
+        swing_contact["position"] if swing_contact is not None else initial_foot_pos[swing_foot_link]
+    )
+
+    support_xy = initial_foot_pos[support_foot_link][:2]
+    swing_xy = initial_foot_pos[swing_foot_link][:2]
+    stance_vec = support_xy - swing_xy
+    stance_half_width = max(0.5 * np.linalg.norm(stance_vec), 1e-6)
+    stance_axis = stance_vec / (2.0 * stance_half_width)
+    stance_midpoint = 0.5 * (support_xy + swing_xy)
+    com_shift_ratio = float(np.dot(c[:2] - stance_midpoint, stance_axis) / stance_half_width)
+
+    return LoadShiftMetrics(
+        support_force=support_force,
+        swing_force=swing_force,
+        support_ratio=support_ratio,
+        com_shift_ratio=com_shift_ratio,
+        com_speed=float(np.linalg.norm(c_dot[:2])),
+        support_slip=float(np.linalg.norm(support_pos[:2] - initial_foot_pos[support_foot_link][:2])),
+        swing_slip=float(np.linalg.norm(swing_pos[:2] - initial_foot_pos[swing_foot_link][:2])),
+    )
+
+
+def compute_phase_com_target(
+    nominal_c_ref: np.ndarray,
+    phase_state: PhaseState,
+    initial_foot_pos: dict[int, np.ndarray],
+    support_foot_link: int,
+    swing_foot_link: int,
+) -> np.ndarray:
+    """Shift the CoM reference toward the support foot before liftoff."""
+    c_ref = nominal_c_ref.copy()
+    if phase_state.phase in (ControlPhase.INIT_SETTLE, ControlPhase.DOUBLE_SUPPORT_HOLD):
+        return c_ref
+
+    support_xy = initial_foot_pos[support_foot_link][:2]
+    swing_xy = initial_foot_pos[swing_foot_link][:2]
+    stance_midpoint = 0.5 * (support_xy + swing_xy)
+    target_ratio = (
+        LOAD_SHIFT_COM_RATIO
+        if phase_state.phase == ControlPhase.LOAD_SHIFT
+        else PRE_LIFTOFF_COM_RATIO
+    )
+    target_xy = stance_midpoint + target_ratio * (support_xy - stance_midpoint)
+    c_ref[:2] = target_xy
+    return c_ref
+
+
 def build_safe_targets(
     initial_dof_angles: np.ndarray,
     joint_name_to_dof_idx: dict[str, int],
     phase_state: PhaseState,
     t: float,
     swing_leg: str,
+    support_leg: str,
+    load_shift_metrics: LoadShiftMetrics,
 ) -> np.ndarray:
     """Build posture targets for the current phase."""
     targets = initial_dof_angles.copy()
     swing_progress = compute_swing_progress(phase_state, t)
+    load_shift_progress = compute_load_shift_progress(phase_state, t)
     hip_name = f"{swing_leg}_hip_pitch_joint"
     knee_name = f"{swing_leg}_knee_joint"
+
+    if load_shift_progress > 0.0:
+        target_ratio = (
+            LOAD_SHIFT_SUPPORT_RATIO
+            if phase_state.phase == ControlPhase.LOAD_SHIFT
+            else PRE_LIFTOFF_SUPPORT_RATIO
+        )
+        target_com_ratio = (
+            LOAD_SHIFT_COM_RATIO
+            if phase_state.phase == ControlPhase.LOAD_SHIFT
+            else PRE_LIFTOFF_COM_RATIO
+        )
+        ratio_error = max(0.0, target_ratio - load_shift_metrics.support_ratio)
+        com_error = max(0.0, target_com_ratio - load_shift_metrics.com_shift_ratio)
+        roll_feedback = LOAD_SHIFT_ROLL_DELTA * min(
+            1.0,
+            8.0
+            * (
+                0.7 * ratio_error / max(target_ratio, 1e-6)
+                + 0.3 * com_error / max(target_com_ratio, 1e-6)
+            ),
+        )
+        roll_delta = min(load_shift_progress * LOAD_SHIFT_ROLL_DELTA, roll_feedback)
+        if phase_state.phase in (ControlPhase.PRE_LIFTOFF, ControlPhase.SINGLE_SUPPORT):
+            swing_force_error = max(
+                0.0, load_shift_metrics.swing_force - PRE_LIFTOFF_SWING_FORCE_MAX
+            )
+            roll_delta += PRE_LIFTOFF_EXTRA_ROLL_DELTA * min(
+                1.0, swing_force_error / max(PRE_LIFTOFF_SWING_FORCE_MAX, 1e-6)
+            )
+        slip_scale = max(0.0, 1.0 - load_shift_metrics.swing_slip / max(SLIP_THRESH, 1e-6))
+        roll_delta *= slip_scale
+        apply_roll_shift_offset(targets, joint_name_to_dof_idx, support_leg, roll_delta)
 
     if hip_name in joint_name_to_dof_idx:
         hip_idx = joint_name_to_dof_idx[hip_name]
@@ -223,6 +377,8 @@ def compute_safe_tau(
 def update_phase_machine(
     phase_state: PhaseState,
     t: float,
+    c: np.ndarray,
+    c_dot: np.ndarray,
     foot_contacts: list[dict],
     preferred_support_foot_link: int,
     swing_foot_link: int,
@@ -245,8 +401,6 @@ def update_phase_machine(
     )
     support_contact = get_contact_entry(foot_contacts, phase_state.locked_support_foot_link)
     support_force = support_contact["normal_force"] if support_contact is not None else 0.0
-    swing_contact = get_contact_entry(foot_contacts, swing_foot_link)
-    swing_force = swing_contact["normal_force"] if swing_contact is not None else 0.0
 
     if phase_state.phase == ControlPhase.INIT_SETTLE:
         if elapsed >= INIT_SETTLE_TIME:
@@ -276,19 +430,63 @@ def update_phase_machine(
             phase_state.ready_since = None
         return None
 
+    load_shift_metrics = compute_load_shift_metrics(
+        c,
+        c_dot,
+        foot_contacts,
+        phase_state.locked_support_foot_link,
+        swing_foot_link,
+        initial_foot_pos,
+    )
+
     if phase_state.phase == ControlPhase.LOAD_SHIFT:
-        if elapsed >= LOAD_SHIFT_TIME:
-            transition_phase(phase_state, ControlPhase.PRE_LIFTOFF, t)
-            return "pre-liftoff"
+        load_shift_ready = (
+            elapsed >= LOAD_SHIFT_TIME
+            and load_shift_metrics.support_force >= DOUBLE_SUPPORT_MIN_FORCE
+            and load_shift_metrics.support_ratio >= LOAD_SHIFT_SUPPORT_RATIO
+            and load_shift_metrics.com_shift_ratio >= LOAD_SHIFT_COM_RATIO
+            and load_shift_metrics.com_speed <= COM_VEL_READY_THRESH
+            and load_shift_metrics.support_slip <= SLIP_THRESH
+            and load_shift_metrics.swing_slip <= SLIP_THRESH
+        )
+        if load_shift_ready:
+            if phase_state.ready_since is None:
+                phase_state.ready_since = t
+            if t - phase_state.ready_since >= LOAD_SHIFT_READY_TIME:
+                transition_phase(phase_state, ControlPhase.PRE_LIFTOFF, t)
+                return (
+                    "pre-liftoff "
+                    f"(support_ratio={load_shift_metrics.support_ratio:.2f}, "
+                    f"com_shift={load_shift_metrics.com_shift_ratio:.2f})"
+                )
+        else:
+            phase_state.ready_since = None
         return None
 
     if phase_state.phase == ControlPhase.PRE_LIFTOFF:
-        if elapsed >= PRE_LIFTOFF_TIME:
-            transition_phase(phase_state, ControlPhase.SINGLE_SUPPORT, t)
-            return (
-                "single-support control "
-                f"(support={support_name(candidate_foot_links, phase_state.locked_support_foot_link)})"
-            )
+        pre_liftoff_ready = (
+            elapsed >= PRE_LIFTOFF_TIME
+            and load_shift_metrics.support_force >= MIN_SUPPORT_FORCE
+            and load_shift_metrics.support_ratio >= PRE_LIFTOFF_SUPPORT_RATIO
+            and load_shift_metrics.swing_force <= PRE_LIFTOFF_SWING_FORCE_MAX
+            and load_shift_metrics.com_shift_ratio >= PRE_LIFTOFF_COM_RATIO
+            and load_shift_metrics.com_speed <= COM_VEL_READY_THRESH
+            and load_shift_metrics.support_slip <= SLIP_THRESH
+            and load_shift_metrics.swing_slip <= SLIP_THRESH
+        )
+        if pre_liftoff_ready:
+            if phase_state.ready_since is None:
+                phase_state.ready_since = t
+            if t - phase_state.ready_since >= PRE_LIFTOFF_READY_TIME:
+                transition_phase(phase_state, ControlPhase.SINGLE_SUPPORT, t)
+                return (
+                    "single-support control "
+                    f"(support={support_name(candidate_foot_links, phase_state.locked_support_foot_link)}, "
+                    f"support_ratio={load_shift_metrics.support_ratio:.2f}, "
+                    f"swing_force={load_shift_metrics.swing_force:.1f}N)"
+                )
+        else:
+            phase_state.ready_since = None
         return None
 
     return None
@@ -339,7 +537,8 @@ def main():
     u_ref[2] = -GRAVITY[2] * robot.total_mass
     mpc.set_reference(x_ref, u_ref)
 
-    c_ref = x_ref[:3]
+    nominal_c_ref = x_ref[:3].copy()
+    c_ref = nominal_c_ref.copy()
     c_dot_ref = x_ref[3:6]
     L_ref = x_ref[6:9]
     c_ddot_ref = np.zeros(3)
@@ -406,6 +605,8 @@ def main():
         transition_msg = update_phase_machine(
             phase_state,
             t,
+            c,
+            c_dot,
             foot_contacts,
             preferred_support_foot_link,
             swing_foot_link,
@@ -436,6 +637,24 @@ def main():
             p_foot = phase_state.filtered_support_point.copy()
         else:
             p_foot = state["p_foot"]
+
+        load_shift_metrics = compute_load_shift_metrics(
+            c,
+            c_dot,
+            foot_contacts,
+            phase_state.locked_support_foot_link,
+            swing_foot_link,
+            initial_foot_pos,
+        )
+        c_ref = compute_phase_com_target(
+            nominal_c_ref,
+            phase_state,
+            initial_foot_pos,
+            phase_state.locked_support_foot_link,
+            swing_foot_link,
+        )
+        x_ref[:3] = c_ref
+        mpc.set_reference(x_ref, u_ref)
 
         x0 = np.concatenate([c, c_dot, L])
 
@@ -486,6 +705,8 @@ def main():
             phase_state,
             t,
             swing_leg,
+            support_leg,
+            load_shift_metrics,
         )
         safe_tau = compute_safe_tau(
             initial_dof_angles,
@@ -575,10 +796,20 @@ def main():
 
         if (step + 1) % 240 == 0:
             print(f"\n--- t={t:.3f}s [{phase_state.phase.name}] ---")
-            print(f"  CoM: [{c[0]:.3f}, {c[1]:.3f}, {c[2]:.3f}]  (ref z={H_COM:.2f})")
+            print(
+                f"  CoM: [{c[0]:.3f}, {c[1]:.3f}, {c[2]:.3f}]  "
+                f"(ref [{c_ref[0]:.3f}, {c_ref[1]:.3f}, {c_ref[2]:.2f}])"
+            )
             mpc_t = mpc_time_log[-1] * 1000 if mpc_time_log else 0.0
             wbc_t = wbc_time_log[-1] * 1000 if wbc_time_log else 0.0
             print(f"  MPC solve: {mpc_t:.2f} ms | WBC solve: {wbc_t:.2f} ms")
+            print(
+                f"  Load shift: support_ratio={load_shift_metrics.support_ratio:.2f}  "
+                f"com_shift={load_shift_metrics.com_shift_ratio:.2f}  "
+                f"swing_force={load_shift_metrics.swing_force:.1f}N  "
+                f"com_speed={load_shift_metrics.com_speed:.3f}m/s  "
+                f"swing_slip={load_shift_metrics.swing_slip*1000:.2f}mm"
+            )
             for fc in foot_contacts:
                 link_name = support_name(candidate_foot_links, fc["link"])
                 slip = np.linalg.norm(fc["position"][:2] - initial_foot_pos[fc["link"]][:2])
