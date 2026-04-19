@@ -1,386 +1,291 @@
-"""URDF 加载，Jacobians，动力学量计算"""
+"""MuJoCo robot model wrapper for kinematics, dynamics, and contact queries."""
 
-import numpy as np
-import pybullet as p
+from pathlib import Path
 from typing import Optional
 
+import mujoco
+import numpy as np
 
-def _skew(v: np.ndarray) -> np.ndarray:
-    """向量叉乘矩阵。"""
-    return np.array([
-        [0.0, -v[2], v[1]],
-        [v[2], 0.0, -v[0]],
-        [-v[1], v[0], 0.0],
-    ])
+
+def _quat_xyzw_to_wxyz(quat_xyzw: np.ndarray) -> np.ndarray:
+    """Convert external [x, y, z, w] quaternion ordering to MuJoCo [w, x, y, z]."""
+    quat_xyzw = np.asarray(quat_xyzw, dtype=float)
+    return np.array([quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]])
+
+
+def _quat_wxyz_to_xyzw(quat_wxyz: np.ndarray) -> np.ndarray:
+    """Convert MuJoCo [w, x, y, z] quaternion ordering to external [x, y, z, w]."""
+    quat_wxyz = np.asarray(quat_wxyz, dtype=float)
+    return np.array([quat_wxyz[1], quat_wxyz[2], quat_wxyz[3], quat_wxyz[0]])
 
 
 class RobotModel:
-    """封装 PyBullet 机器人模型的运动学与动力学接口。"""
+    """Encapsulate MuJoCo robot model access behind the existing MPC/WBC interface."""
 
-    def __init__(self, urdf_path: str, base_position: Optional[np.ndarray] = None,
-                 base_orientation: Optional[np.ndarray] = None,
-                 use_fixed_base: bool = False):
-        """
-        加载 URDF 并初始化模型。
+    def __init__(
+        self,
+        model_path: str,
+        base_position: Optional[np.ndarray] = None,
+        base_orientation: Optional[np.ndarray] = None,
+        use_fixed_base: bool = False,
+    ):
+        if use_fixed_base:
+            raise ValueError("MuJoCo G1 model is configured with a floating base only.")
 
-        Args:
-            urdf_path: URDF 文件路径
-            base_position: 初始基座位置 [x, y, z]
-            base_orientation: 初始基座姿态四元数 [x, y, z, w]
-            use_fixed_base: 是否固定基座（仅用于测试，正常浮动基应为 False）
-        """
-        self.urdf_path = urdf_path
+        self.model_path = str(Path(model_path).expanduser())
+        self.model = mujoco.MjModel.from_xml_path(self.model_path)
+        self.data = mujoco.MjData(self.model)
+
         if base_position is None:
-            base_position = [0.0, 0.0, 1.0]
+            base_position = np.array([0.0, 0.0, 1.0])
         if base_orientation is None:
-            base_orientation = [0.0, 0.0, 0.0, 1.0]
+            base_orientation = np.array([0.0, 0.0, 0.0, 1.0])
 
-        self.robot_id = p.loadURDF(
-            urdf_path,
-            basePosition=base_position,
-            baseOrientation=base_orientation,
-            useFixedBase=use_fixed_base,
+        self.root_body_id = mujoco.mj_name2id(
+            self.model, mujoco.mjtObj.mjOBJ_BODY, "pelvis"
         )
-        self.num_joints = p.getNumJoints(self.robot_id)
-
-        # 解析关节信息，区分固定关节与自由度关节
-        self.joint_info = [p.getJointInfo(self.robot_id, i) for i in range(self.num_joints)]
-        self.dof_joints = [
-            i for i, info in enumerate(self.joint_info)
-            if info[2] != p.JOINT_FIXED
-        ]
-        # link 名 -> link 索引映射（基座为 -1）
         self.link_name_to_index = {
-            info[12].decode('utf-8'): i
-            for i, info in enumerate(self.joint_info)
+            mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_BODY, body_id): body_id
+            for body_id in range(1, self.model.nbody)
         }
-        self.link_name_to_index['base'] = -1
-        self.nv = 6 + len(self.dof_joints)          # 广义速度维度
-        self.nq = 7 + self.num_joints               # 广义位置维度（含所有关节）
+        self.link_name_to_index["base"] = self.root_body_id
 
-        # 计算并缓存总质量
-        self._total_mass = sum(
-            p.getDynamicsInfo(self.robot_id, i)[0]
-            for i in range(-1, self.num_joints)
+        self.dof_joints = [
+            joint_id
+            for joint_id in range(self.model.njnt)
+            if self.model.jnt_type[joint_id] != mujoco.mjtJoint.mjJNT_FREE
+        ]
+        self.dof_joint_names = [
+            mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_JOINT, joint_id)
+            for joint_id in self.dof_joints
+        ]
+        self.dof_joint_name_to_index = {
+            name: idx for idx, name in enumerate(self.dof_joint_names)
+        }
+        self.num_joints = len(self.dof_joints)
+        self.nv = int(self.model.nv)
+        self.nq = 7 + self.num_joints
+
+        self.joint_to_actuator_id = {}
+        for actuator_id in range(self.model.nu):
+            joint_id = int(self.model.actuator_trnid[actuator_id, 0])
+            self.joint_to_actuator_id[joint_id] = actuator_id
+
+        self.tau_limits = np.array(
+            [
+                abs(float(self.model.jnt_actfrcrange[joint_id, 1]))
+                if self.model.jnt_actfrclimited[joint_id]
+                else np.inf
+                for joint_id in self.dof_joints
+            ]
         )
+        self._total_mass = float(np.sum(self.model.body_mass[1:]))
         if self._total_mass <= 0.0:
             raise ValueError(
                 f"Robot total mass must be positive, got {self._total_mass}. "
-                "Check URDF inertial definitions."
+                "Check MuJoCo inertial definitions."
             )
 
-    # -----------------------------------------------------------------------
-    # 属性
-    # -----------------------------------------------------------------------
+        self.reset_base_pose(np.asarray(base_position, dtype=float), np.asarray(base_orientation, dtype=float))
+
     @property
     def total_mass(self) -> float:
-        """机器人总质量 [kg]。"""
+        """Robot total mass [kg]."""
         return self._total_mass
 
-    # -----------------------------------------------------------------------
-    # 状态读取
-    # -----------------------------------------------------------------------
-    def get_state(self) -> tuple:
-        """
-        返回当前状态 (q, v)。
+    def _sync_state(self, q: Optional[np.ndarray] = None, v: Optional[np.ndarray] = None) -> None:
+        if q is not None:
+            q = np.asarray(q, dtype=float)
+            quat = _quat_xyzw_to_wxyz(q[3:7])
+            quat_norm = np.linalg.norm(quat)
+            if quat_norm == 0.0:
+                raise ValueError("Base quaternion must be non-zero.")
+            quat /= quat_norm
 
-        q: 广义位置 [base_pos(3), base_quat(4), joint_pos(num_joints)]
-        v: 广义速度 [base_vel(3), base_omega(3), joint_vel(num_dof_joints)]
-        """
-        pos, orn = p.getBasePositionAndOrientation(self.robot_id)
-        lin_vel, ang_vel = p.getBaseVelocity(self.robot_id)
-        joint_states = p.getJointStates(self.robot_id, range(self.num_joints))
+            self.data.qpos[:3] = q[:3]
+            self.data.qpos[3:7] = quat
+            self.data.qpos[7:] = q[7:]
 
+        if v is not None:
+            self.data.qvel[:] = np.asarray(v, dtype=float)
+
+        mujoco.mj_forward(self.model, self.data)
+
+    def _current_q(self) -> np.ndarray:
         q = np.zeros(self.nq)
-        q[0:3] = pos
-        q[3:7] = orn
-        for i in range(self.num_joints):
-            q[7 + i] = joint_states[i][0]
+        q[:3] = self.data.qpos[:3]
+        q[3:7] = _quat_wxyz_to_xyzw(self.data.qpos[3:7])
+        q[7:] = self.data.qpos[7:]
+        return q
 
-        v = np.zeros(self.nv)
-        v[0:3] = lin_vel
-        v[3:6] = ang_vel
-        for idx, joint_idx in enumerate(self.dof_joints):
-            v[6 + idx] = joint_states[joint_idx][1]
+    def _current_v(self) -> np.ndarray:
+        return np.array(self.data.qvel, copy=True)
 
-        return q, v
+    def _body_rotation(self, body_id: int) -> np.ndarray:
+        return np.array(self.data.xmat[body_id]).reshape(3, 3)
 
-    # -----------------------------------------------------------------------
-    # 辅助：构造自由度关节位置 / 速度 / 加速度列表
-    # -----------------------------------------------------------------------
-    def _get_dof_positions(self, q: np.ndarray) -> list:
-        """从完整 q 中提取自由度关节位置（用于 PyBullet API）。"""
-        return [float(q[7 + idx]) for idx in self.dof_joints]
+    def _restore_state(self, qpos: np.ndarray, qvel: np.ndarray) -> None:
+        self.data.qpos[:] = qpos
+        self.data.qvel[:] = qvel
+        mujoco.mj_forward(self.model, self.data)
 
-    def _get_dof_velocities(self, v: np.ndarray) -> list:
-        """从完整 v 中提取自由度关节速度。"""
-        return [float(v[6 + idx]) for idx in range(len(self.dof_joints))]
+    def _centroidal_jacobian_from_unit_velocities(
+        self, q: np.ndarray, quantity: str
+    ) -> np.ndarray:
+        self._sync_state(q=q, v=np.zeros(self.nv))
+        saved_qpos = np.array(self.data.qpos, copy=True)
+        saved_qvel = np.array(self.data.qvel, copy=True)
 
-    def _get_all_joint_positions(self, q: np.ndarray) -> list:
-        """构造包含所有关节（含固定关节）的位置列表。"""
-        return [float(q[7 + i]) for i in range(self.num_joints)]
+        J = np.zeros((3, self.nv))
+        for dof in range(self.nv):
+            self.data.qvel[:] = 0.0
+            self.data.qvel[dof] = 1.0
+            mujoco.mj_forward(self.model, self.data)
+            mujoco.mj_subtreeVel(self.model, self.data)
+            if quantity == "com":
+                J[:, dof] = self.data.subtree_linvel[self.root_body_id]
+            elif quantity == "angular_momentum":
+                J[:, dof] = self.data.subtree_angmom[self.root_body_id]
+            else:
+                self._restore_state(saved_qpos, saved_qvel)
+                raise ValueError(f"Unsupported centroidal quantity: {quantity}")
 
-    def _get_all_joint_velocities(self, v: np.ndarray) -> list:
-        """构造包含所有关节（含固定关节）的速度列表，固定关节为 0。"""
-        all_vel = [0.0] * self.num_joints
-        for idx, joint_idx in enumerate(self.dof_joints):
-            all_vel[joint_idx] = float(v[6 + idx])
-        return all_vel
+        self._restore_state(saved_qpos, saved_qvel)
+        return J
 
-    # -----------------------------------------------------------------------
-    # 动力学计算
-    # -----------------------------------------------------------------------
+    def get_state(self) -> tuple[np.ndarray, np.ndarray]:
+        """Return current state (q, v)."""
+        return self._current_q(), self._current_v()
+
     def compute_mass_matrix(self, q: np.ndarray) -> np.ndarray:
-        """计算质量矩阵 M(q)，维度 (nv, nv)。"""
-        joint_positions = self._get_dof_positions(q)
-        result = p.calculateMassMatrix(self.robot_id, joint_positions)
-        return np.array(result)
+        """Compute mass matrix M(q), shape (nv, nv)."""
+        self._sync_state(q=q)
+        M = np.zeros((self.nv, self.nv))
+        mujoco.mj_fullM(self.model, M, self.data.qM)
+        return M
 
     def compute_coriolis_gravity(self, q: np.ndarray, v: np.ndarray) -> np.ndarray:
-        """
-        计算 C(q, v)（科氏力 + 重力），维度 (nv,)。
+        """Compute bias forces C(q, v), shape (nv,)."""
+        self._sync_state(q=q, v=v)
+        return np.array(self.data.qfrc_bias, copy=True)
 
-        通过将加速度设为零调用 calculateInverseDynamics 得到。
-        """
-        joint_positions = self._get_all_joint_positions(q)
-        obj_velocities = self._get_all_joint_velocities(v)
-        obj_accelerations = [0.0] * self.num_joints
-
-        try:
-            C = p.calculateInverseDynamics(
-                self.robot_id, joint_positions, obj_velocities, obj_accelerations
-            )
-            return np.array(C)
-        except Exception:
-            # 浮动基机器人在某些构型下逆动力学计算会失败，回退到重力补偿
-            C = np.zeros(self.nv)
-            C[2] = -self._total_mass * 9.81
-            return C
-
-    def compute_com_position(self, q: np.ndarray = None) -> np.ndarray:
-        """计算质心 CoM 位置 (3,)。"""
-        com = np.zeros(3)
-
-        # 基座
-        mass = p.getDynamicsInfo(self.robot_id, -1)[0]
-        pos, _ = p.getBasePositionAndOrientation(self.robot_id)
-        com += mass * np.array(pos)
-
-        # 连杆
-        for i in range(self.num_joints):
-            mass = p.getDynamicsInfo(self.robot_id, i)[0]
-            if mass <= 0.0:
-                continue
-            link_state = p.getLinkState(self.robot_id, i, computeForwardKinematics=1)
-            pos = np.array(link_state[0])   # linkWorldPosition = CoM
-            com += mass * pos
-
-        com /= self.total_mass
-        return com
+    def compute_com_position(self, q: np.ndarray | None = None) -> np.ndarray:
+        """Compute whole-body center-of-mass position, shape (3,)."""
+        if q is not None:
+            self._sync_state(q=q)
+        return np.array(self.data.subtree_com[self.root_body_id], copy=True)
 
     def compute_com_velocity(self, q: np.ndarray, v: np.ndarray) -> np.ndarray:
-        """计算质心 CoM 速度 (3,)。"""
-        J_com = self.get_com_jacobian(q)
-        return J_com @ v
+        """Compute whole-body center-of-mass velocity, shape (3,)."""
+        self._sync_state(q=q, v=v)
+        mujoco.mj_subtreeVel(self.model, self.data)
+        return np.array(self.data.subtree_linvel[self.root_body_id], copy=True)
 
     def compute_centroidal_momentum(self, q: np.ndarray, v: np.ndarray) -> np.ndarray:
-        """计算质心角动量 L (3,)。"""
-        J_L = self.get_angular_momentum_jacobian(q)
-        return J_L @ v
+        """Compute centroidal angular momentum L, shape (3,)."""
+        self._sync_state(q=q, v=v)
+        mujoco.mj_subtreeVel(self.model, self.data)
+        return np.array(self.data.subtree_angmom[self.root_body_id], copy=True)
 
-    # -----------------------------------------------------------------------
-    # Jacobian 计算
-    # -----------------------------------------------------------------------
-    def get_foot_jacobian(self, foot_link: int, q: np.ndarray,
-                          local_position: Optional[np.ndarray] = None) -> np.ndarray:
-        """
-        计算支撑足的接触 Jacobian J_c，维度 (6, nv)。
-
-        Args:
-            foot_link: 支撑足连杆索引
-            q: 广义位置
-            local_position: 接触点在连杆局部坐标系中的位置，默认 [0, 0, 0]
-        """
+    def get_foot_jacobian(
+        self,
+        foot_link: int,
+        q: np.ndarray,
+        local_position: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
+        """Compute 6D foot Jacobian at the requested body point, shape (6, nv)."""
+        self._sync_state(q=q)
         if local_position is None:
-            local_position = [0.0, 0.0, 0.0]
-        joint_positions = self._get_dof_positions(q)
-        n_dof = len(self.dof_joints)
-        lin_jac, ang_jac = p.calculateJacobian(
-            self.robot_id, foot_link, local_position,
-            joint_positions,
-            [0.0] * n_dof,
-            [0.0] * n_dof,
-        )
-        J_c = np.vstack([np.array(lin_jac), np.array(ang_jac)])
-        return J_c
+            local_position = np.zeros(3)
+        else:
+            local_position = np.asarray(local_position, dtype=float)
+
+        body_origin = np.array(self.data.xpos[foot_link], copy=True)
+        world_point = body_origin + self._body_rotation(foot_link) @ local_position
+
+        jacp = np.zeros((3, self.nv))
+        jacr = np.zeros((3, self.nv))
+        mujoco.mj_jac(self.model, self.data, jacp, jacr, world_point, foot_link)
+        return np.vstack([jacp, jacr])
 
     def get_com_jacobian(self, q: np.ndarray) -> np.ndarray:
-        """
-        计算 CoM Jacobian J_com，维度 (3, nv)。
-
-        J_com = (1 / M) * sum_i(m_i * J_{v_i})
-        """
-        joint_positions = self._get_dof_positions(q)
-        n_dof = len(self.dof_joints)
-        zero_dof = [0.0] * n_dof
-        J_com = np.zeros((3, self.nv))
-
-        # 基座
-        mass, _, _, local_inertial_pos, _ = p.getDynamicsInfo(self.robot_id, -1)[:5]
-        if mass > 0.0:
-            lin_jac, _ = p.calculateJacobian(
-                self.robot_id, -1, local_inertial_pos,
-                joint_positions, zero_dof, zero_dof,
-            )
-            J_com += mass * np.array(lin_jac)
-
-        # 连杆
-        for i in range(self.num_joints):
-            mass, _, _, local_inertial_pos, _ = p.getDynamicsInfo(self.robot_id, i)[:5]
-            if mass <= 0.0:
-                continue
-            lin_jac, _ = p.calculateJacobian(
-                self.robot_id, i, local_inertial_pos,
-                joint_positions, zero_dof, zero_dof,
-            )
-            J_com += mass * np.array(lin_jac)
-
-        J_com /= self.total_mass
-        return J_com
+        """Compute center-of-mass Jacobian, shape (3, nv)."""
+        return self._centroidal_jacobian_from_unit_velocities(q, quantity="com")
 
     def get_angular_momentum_jacobian(self, q: np.ndarray) -> np.ndarray:
-        """
-        计算角动量 Jacobian J_L，维度 (3, nv)。
+        """Compute centroidal angular-momentum Jacobian, shape (3, nv)."""
+        return self._centroidal_jacobian_from_unit_velocities(
+            q, quantity="angular_momentum"
+        )
 
-        J_L = sum_i( I_i_world * J_{w_i} + m_i * [r_i - c]x * J_{v_i} )
-        """
-        c = self.compute_com_position()
-        joint_positions = self._get_dof_positions(q)
-        n_dof = len(self.dof_joints)
-        zero_dof = [0.0] * n_dof
-        J_L = np.zeros((3, self.nv))
+    def get_link_com_position(self, link_index: int) -> np.ndarray:
+        """Get world-frame body CoM position, shape (3,)."""
+        return np.array(self.data.xipos[link_index], copy=True)
 
-        # 基座
-        mass, _, local_inertia_diag, local_inertial_pos, _ = p.getDynamicsInfo(self.robot_id, -1)[:5]
-        if mass > 0.0:
-            lin_jac, ang_jac = p.calculateJacobian(
-                self.robot_id, -1, local_inertial_pos,
-                joint_positions, zero_dof, zero_dof,
-            )
-            J_v = np.array(lin_jac)
-            J_w = np.array(ang_jac)
+    def get_link_velocity(self, link_index: int) -> tuple[np.ndarray, np.ndarray]:
+        """Get world-frame body CoM linear and angular velocity."""
+        jacp = np.zeros((3, self.nv))
+        jacr = np.zeros((3, self.nv))
+        mujoco.mj_jacBodyCom(self.model, self.data, jacp, jacr, link_index)
+        lin_vel = jacp @ self.data.qvel
+        ang_vel = jacr @ self.data.qvel
+        return lin_vel, ang_vel
 
-            base_pos, base_orn = p.getBasePositionAndOrientation(self.robot_id)
-            R = np.array(p.getMatrixFromQuaternion(base_orn)).reshape(3, 3)
-            I_local = np.diag(local_inertia_diag)
-            I_world = R @ I_local @ R.T
+    def reset_joint_positions(self, joint_positions: np.ndarray) -> None:
+        """Reset actuated joint positions in DOF order and zero their velocities."""
+        joint_positions = np.asarray(joint_positions, dtype=float)
+        for dof_idx, joint_id in enumerate(self.dof_joints):
+            if dof_idx >= len(joint_positions):
+                break
+            qpos_adr = int(self.model.jnt_qposadr[joint_id])
+            qvel_adr = int(self.model.jnt_dofadr[joint_id])
+            self.data.qpos[qpos_adr] = float(joint_positions[dof_idx])
+            self.data.qvel[qvel_adr] = 0.0
+        mujoco.mj_forward(self.model, self.data)
 
-            r = np.array(base_pos) - c
-            J_L += I_world @ J_w + mass * _skew(r) @ J_v
+    def reset_base_pose(self, position: np.ndarray, orientation: np.ndarray) -> None:
+        """Reset floating-base pose and clear base velocity."""
+        quat = _quat_xyzw_to_wxyz(np.asarray(orientation, dtype=float))
+        quat /= np.linalg.norm(quat)
+        self.data.qpos[:3] = np.asarray(position, dtype=float)
+        self.data.qpos[3:7] = quat
+        self.data.qvel[:6] = 0.0
+        self.data.ctrl[:] = 0.0
+        mujoco.mj_forward(self.model, self.data)
 
-        # 连杆
-        for i in range(self.num_joints):
-            mass, _, local_inertia_diag, local_inertial_pos, _ = p.getDynamicsInfo(self.robot_id, i)[:5]
-            if mass <= 0.0:
+    def set_joint_torques(self, torques: np.ndarray) -> None:
+        """Apply actuated-joint torques in DOF order."""
+        torques = np.asarray(torques, dtype=float)
+        self.data.ctrl[:] = 0.0
+        for dof_idx, joint_id in enumerate(self.dof_joints):
+            actuator_id = self.joint_to_actuator_id.get(joint_id)
+            if actuator_id is None or dof_idx >= len(torques):
+                continue
+            torque = float(np.clip(torques[dof_idx], -self.tau_limits[dof_idx], self.tau_limits[dof_idx]))
+            self.data.ctrl[actuator_id] = torque
+
+    def step(self) -> None:
+        """Advance the MuJoCo simulation by one step."""
+        mujoco.mj_step(self.model, self.data)
+
+    def check_contact(self, link_index: int, other_body_id: int = -1) -> tuple[bool, float]:
+        """Check whether a body is in contact and sum its normal contact force."""
+        is_contact = False
+        normal_force = 0.0
+        for contact_id in range(self.data.ncon):
+            contact = self.data.contact[contact_id]
+            body1 = int(self.model.geom_bodyid[int(contact.geom1)])
+            body2 = int(self.model.geom_bodyid[int(contact.geom2)])
+            if link_index not in (body1, body2):
                 continue
 
-            lin_jac, ang_jac = p.calculateJacobian(
-                self.robot_id, i, local_inertial_pos,
-                joint_positions, zero_dof, zero_dof,
-            )
-            J_v = np.array(lin_jac)
-            J_w = np.array(ang_jac)
+            other_body = body2 if body1 == link_index else body1
+            if other_body_id >= 0 and other_body != other_body_id:
+                continue
 
-            link_state = p.getLinkState(self.robot_id, i, computeForwardKinematics=1)
-            link_pos = np.array(link_state[0])
-            link_orn = np.array(link_state[1])
-            R = np.array(p.getMatrixFromQuaternion(link_orn)).reshape(3, 3)
-            I_local = np.diag(local_inertia_diag)
-            I_world = R @ I_local @ R.T
+            wrench = np.zeros(6)
+            mujoco.mj_contactForce(self.model, self.data, contact_id, wrench)
+            normal_force += max(0.0, float(wrench[0]))
+            is_contact = True
 
-            r = link_pos - c
-            J_L += I_world @ J_w + mass * _skew(r) @ J_v
-
-        return J_L
-
-    # -----------------------------------------------------------------------
-    # 连杆位姿查询
-    # -----------------------------------------------------------------------
-    def get_link_com_position(self, link_index: int) -> np.ndarray:
-        """
-        获取指定连杆的质心位置（世界坐标）。
-
-        Args:
-            link_index: 连杆索引（-1 表示基座）
-
-        Returns:
-            质心位置 (3,)
-        """
-        if link_index == -1:
-            pos, _ = p.getBasePositionAndOrientation(self.robot_id)
-            return np.array(pos)
-        link_state = p.getLinkState(self.robot_id, link_index, computeForwardKinematics=1)
-        return np.array(link_state[0])
-
-    def get_link_velocity(self, link_index: int) -> tuple:
-        """
-        获取指定连杆质心的线速度与角速度（世界坐标）。
-
-        Args:
-            link_index: 连杆索引（-1 表示基座）
-
-        Returns:
-            (lin_vel, ang_vel) 均为 (3,)
-        """
-        if link_index == -1:
-            lin_vel, ang_vel = p.getBaseVelocity(self.robot_id)
-            return np.array(lin_vel), np.array(ang_vel)
-        link_state = p.getLinkState(
-            self.robot_id, link_index,
-            computeLinkVelocity=1, computeForwardKinematics=1
-        )
-        return np.array(link_state[6]), np.array(link_state[7])
-
-    # -----------------------------------------------------------------------
-    # 辅助
-    # -----------------------------------------------------------------------
-    def reset_joint_positions(self, joint_positions: np.ndarray):
-        """重置自由度关节位置（跳过固定关节）。"""
-        for idx, joint_idx in enumerate(self.dof_joints):
-            if idx < len(joint_positions):
-                p.resetJointState(
-                    self.robot_id, joint_idx, float(joint_positions[idx])
-                )
-
-    def reset_base_pose(self, position: np.ndarray, orientation: np.ndarray):
-        """重置基座位姿。"""
-        p.resetBasePositionAndOrientation(
-            self.robot_id, position.tolist(), orientation.tolist()
-        )
-
-    def check_contact(self, link_index: int, other_body_id: int = -1) -> tuple:
-        """
-        检测指定 link 是否与目标 body 接触。
-
-        Args:
-            link_index: 待检测的 link 索引（-1 为基座）
-            other_body_id: 目标 body ID，默认 -1 表示与所有 body 检测
-
-        Returns:
-            (is_contact: bool, normal_force: float)
-            is_contact: 是否存在接触点
-            normal_force: 所有接触点的法向力之和 [N]
-        """
-        if other_body_id >= 0:
-            contact_points = p.getContactPoints(
-                bodyA=self.robot_id,
-                bodyB=other_body_id,
-                linkIndexA=link_index,
-            )
-        else:
-            contact_points = p.getContactPoints(
-                bodyA=self.robot_id,
-                linkIndexA=link_index,
-            )
-        normal_force = sum(cp[9] for cp in contact_points)
-        return len(contact_points) > 0, normal_force
+        return is_contact, normal_force

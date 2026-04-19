@@ -23,6 +23,8 @@ class WholeBodyController:
 
         self.solver = osqp.OSQP()
         self.A_fcon, self.b_fcon = build_friction_cone_matrix(MU)
+        self.last_status = "not_run"
+        self.last_status_val = None
 
         self._build_qp_matrices()
 
@@ -208,6 +210,8 @@ class WholeBodyController:
             max_iter=4000,
         )
         result = self.solver.solve()
+        self.last_status = result.info.status
+        self.last_status_val = result.info.status_val
 
         if result.info.status_val != 1:
             return None

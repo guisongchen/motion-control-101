@@ -6,7 +6,7 @@ from robot_model import RobotModel
 
 
 class StateEstimator:
-    """状态估计器：从 PyBullet 读取原始状态并计算 MPC/WBC 所需量。"""
+    """状态估计器：从 MuJoCo 读取原始状态并计算 MPC/WBC 所需量。"""
 
     def __init__(self, robot: RobotModel, candidate_foot_links: List[int]):
         """
@@ -17,7 +17,9 @@ class StateEstimator:
         self.robot = robot
         self.candidate_foot_links = candidate_foot_links
 
-    def update(self) -> dict:
+    def update(self,
+               preferred_support_foot_link: int | None = None,
+               lock_support: bool = False) -> dict:
         """
         读取当前仿真状态并计算所有 MPC/WBC 输入量。
 
@@ -54,6 +56,9 @@ class StateEstimator:
             if normal_force > max_force:
                 max_force = normal_force
                 support_foot_link = link
+
+        if lock_support and preferred_support_foot_link is not None:
+            support_foot_link = preferred_support_foot_link
 
         # 回退：若都没有接触，取第一个候选足端（避免 None 导致后续崩溃）
         if support_foot_link is None and self.candidate_foot_links:

@@ -1,17 +1,19 @@
-"""主循环：MPC + WBC + PyBullet"""
+"""Main loop: MPC + WBC + MuJoCo."""
 
-import time
 import numpy as np
-import pybullet as p
-import pybullet_data
 
 from config import (
     DT_SIM, WBC_FREQ, MPC_FREQ, SIM_DURATION,
-    URDF_PATH, INITIAL_POSE, LIFT_LEG, LIFT_TIME, H_COM,
+    MODEL_PATH, LIFT_LEG, LIFT_TIME, H_COM,
     FOOT_LINK_NAMES, STANDING_JOINT_ANGLES,
+    SUPPORT_FOOT_NAME,
     BASE_INITIAL_POS, BASE_INITIAL_ORN,
     NX, NU, N_HORIZON, T_S, GRAVITY, MU,
     RMSE_THRESH, SLIP_THRESH, MPC_TIME_THRESH, WBC_TIME_THRESH,
+    POSTURE_KP, POSTURE_KD, LIFT_LEG_KP, LIFT_LEG_KD,
+    TRANSITION_BLEND_TIME, SWING_RAMP_TIME,
+    SWING_HIP_PITCH_TARGET, SWING_KNEE_TARGET, SUPPORT_POINT_FILTER,
+    MIN_SUPPORT_FORCE,
 )
 from robot_model import RobotModel
 from state_estimator import StateEstimator
@@ -53,45 +55,56 @@ def compute_centroidal_dynamics(m: float, c: np.ndarray, p_foot: np.ndarray,
     return A_d, B_d, d_d
 
 
+def compute_pd_torque(
+    q_target: np.ndarray,
+    q_current: np.ndarray,
+    qd_current: np.ndarray,
+    kp: float,
+    kd: float,
+    tau_limit: np.ndarray,
+) -> np.ndarray:
+    """Simple joint-space PD torque for MuJoCo motor actuators."""
+    tau = kp * (q_target - q_current) - kd * qd_current
+    return np.clip(tau, -tau_limit, tau_limit)
+
+
+def format_vector(vec: np.ndarray) -> str:
+    """Compact vector formatter for runtime diagnostics."""
+    return "[" + ", ".join(f"{x:.2f}" for x in vec) + "]"
+
+
 def main():
     # =====================================================================
-    # 1. 初始化 PyBullet
+    # 1. 加载 MuJoCo 机器人
     # =====================================================================
-    physics_client = p.connect(p.DIRECT)
-    p.setAdditionalSearchPath(pybullet_data.getDataPath())
-    p.setGravity(*GRAVITY)
-    p.setTimeStep(DT_SIM)
-    plane_id = p.loadURDF("plane.urdf")
-
-    # =====================================================================
-    # 2. 加载机器人
-    # =====================================================================
-    robot = RobotModel(URDF_PATH)
+    robot = RobotModel(MODEL_PATH)
+    robot.model.opt.gravity[:] = GRAVITY
+    robot.model.opt.timestep = DT_SIM
+    robot.reset_base_pose(BASE_INITIAL_POS, BASE_INITIAL_ORN)
     candidate_foot_links = [
         robot.link_name_to_index[name] for name in FOOT_LINK_NAMES
     ]
+    foot_name_to_link = {
+        name: robot.link_name_to_index[name] for name in FOOT_LINK_NAMES
+    }
+    preferred_support_foot_link = foot_name_to_link[SUPPORT_FOOT_NAME]
+    locked_support_foot_link = preferred_support_foot_link
     estimator = StateEstimator(robot, candidate_foot_links)
 
     # -----------------------------------------------------------------
     # 设置初始姿势（双脚站立）
     # -----------------------------------------------------------------
-    robot.reset_base_pose(BASE_INITIAL_POS, BASE_INITIAL_ORN)
-
     # 按关节名构造初始角度数组，同时建立名称映射
     initial_dof_angles = np.zeros(len(robot.dof_joints))
-    joint_name_to_dof_idx = {}
-    for idx, joint_idx in enumerate(robot.dof_joints):
-        joint_name = robot.joint_info[joint_idx][1].decode('utf-8')
-        joint_name_to_dof_idx[joint_name] = idx
+    joint_name_to_dof_idx = robot.dof_joint_name_to_index.copy()
+    for idx, joint_name in enumerate(robot.dof_joint_names):
         if joint_name in STANDING_JOINT_ANGLES:
             initial_dof_angles[idx] = STANDING_JOINT_ANGLES[joint_name]
 
     robot.reset_joint_positions(initial_dof_angles)
 
     # 读取各关节最大力矩
-    tau_max_limits = np.zeros(robot.nv - 6)
-    for idx, joint_idx in enumerate(robot.dof_joints):
-        tau_max_limits[idx] = robot.joint_info[joint_idx][10]
+    tau_max_limits = robot.tau_limits.copy()
     tau_min_limits = -tau_max_limits
 
     # 左腿关节索引（用于抬腿动作）
@@ -109,7 +122,7 @@ def main():
     ]
 
     # =====================================================================
-    # 3. 初始化控制器
+    # 2. 初始化控制器
     # =====================================================================
     mpc = CentroidalMPC()
     wbc = WholeBodyController(robot.nv)
@@ -161,11 +174,14 @@ def main():
     use_mpc_wbc = False
     mpc_result = None
     wbc_result = None
+    last_valid_support_tau = None
+    filtered_support_point = initial_foot_pos[locked_support_foot_link].copy()
+    last_wbc_warn_step = -10_000
 
     # 用于 WBC 的 f_ref（MPC 输出，在两次 MPC 求解之间保持）
     f_ref = u_ref.copy()
 
-    print("\n===== 开始仿真（单足站立测试模式）=====")
+    print("\n===== 开始仿真（MuJoCo 单足站立测试模式）=====")
     print(f"总质量: {robot.total_mass:.2f} kg")
     print(f"仿真时长: {SIM_DURATION:.1f} s")
     print(f"MPC 周期: {mpc_period} 步 ({mpc_period * DT_SIM * 1000:.1f} ms)")
@@ -178,15 +194,36 @@ def main():
         # -----------------------------------------------------------------
         # 4.1 状态估计
         # -----------------------------------------------------------------
-        state = estimator.update()
+        state = estimator.update(
+            preferred_support_foot_link=locked_support_foot_link if use_mpc_wbc else None,
+            lock_support=use_mpc_wbc,
+        )
         c = state["c"]
         c_dot = state["c_dot"]
         L = state["L"]
         q = state["q"]
         v = state["v"]
         support_foot_link = state["support_foot_link"]
-        p_foot = state["p_foot"]
         foot_contacts = state["foot_contacts"]
+
+        if use_mpc_wbc:
+            support_foot_link = locked_support_foot_link
+            support_contact = next(
+                (fc for fc in foot_contacts if fc["link"] == support_foot_link),
+                None,
+            )
+            measured_support_point = (
+                support_contact["position"].copy()
+                if support_contact is not None
+                else robot.get_link_com_position(support_foot_link)
+            )
+            filtered_support_point = (
+                (1.0 - SUPPORT_POINT_FILTER) * filtered_support_point
+                + SUPPORT_POINT_FILTER * measured_support_point
+            )
+            p_foot = filtered_support_point.copy()
+        else:
+            p_foot = state["p_foot"]
 
         x0 = np.concatenate([c, c_dot, L])
 
@@ -196,7 +233,30 @@ def main():
         if not leg_lifted and t >= LIFT_TIME:
             leg_lifted = True
             use_mpc_wbc = True
-            print(f"[INFO] t={t:.3f}s 切换至 MPC+WBC 单足站立控制")
+            preferred_support_contact = next(
+                (
+                    fc for fc in foot_contacts
+                    if fc["link"] == preferred_support_foot_link
+                ),
+                None,
+            )
+            if (
+                preferred_support_contact is not None
+                and preferred_support_contact["normal_force"] >= MIN_SUPPORT_FORCE
+            ):
+                locked_support_foot_link = preferred_support_foot_link
+            else:
+                locked_support_foot_link = max(
+                    foot_contacts, key=lambda fc: fc["normal_force"]
+                )["link"]
+            filtered_support_point = initial_foot_pos[locked_support_foot_link].copy()
+            locked_support_name = FOOT_LINK_NAMES[
+                candidate_foot_links.index(locked_support_foot_link)
+            ]
+            print(
+                f"[INFO] t={t:.3f}s 切换至 MPC+WBC 单足站立控制 "
+                f"(support={locked_support_name})"
+            )
 
         # -----------------------------------------------------------------
         # 4.3 MPC 求解（低频）
@@ -250,50 +310,98 @@ def main():
         # -----------------------------------------------------------------
         # 4.5 施加控制指令
         # -----------------------------------------------------------------
-        if not use_mpc_wbc:
-            # 阶段 1：双腿站立，位置控制
-            for idx, joint_idx in enumerate(robot.dof_joints):
-                p.setJointMotorControl2(
-                    robot.robot_id, joint_idx,
-                    p.POSITION_CONTROL,
-                    targetPosition=initial_dof_angles[idx],
-                    force=500.0,
-                )
-        else:
-            # 阶段 2：单足站立
-            # 左腿（抬起的腿）：位置控制跟踪抬腿轨迹
-            lift_progress = min(1.0, (t - LIFT_TIME) / 0.5)
-            left_targets = initial_dof_angles.copy()
-            if "left_hip_pitch_joint" in joint_name_to_dof_idx:
-                left_targets[joint_name_to_dof_idx["left_hip_pitch_joint"]] = 0.3 * lift_progress
-            if "left_knee_joint" in joint_name_to_dof_idx:
-                left_targets[joint_name_to_dof_idx["left_knee_joint"]] = -0.6 * lift_progress
+        joint_positions = q[7:]
+        joint_velocities = v[6:]
+        transition_alpha = 0.0
+        if use_mpc_wbc:
+            transition_alpha = min(
+                1.0, max(0.0, (t - LIFT_TIME) / TRANSITION_BLEND_TIME)
+            )
 
-            for idx, joint_idx in enumerate(robot.dof_joints):
-                if idx in left_leg_dof_indices:
-                    # 抬起的腿：位置控制
-                    p.setJointMotorControl2(
-                        robot.robot_id, joint_idx,
-                        p.POSITION_CONTROL,
-                        targetPosition=left_targets[idx],
-                        force=100.0,
-                    )
-                else:
-                    # 支撑腿及其他关节：力矩控制
-                    if wbc_result is not None:
-                        tau_cmd = float(wbc_result["tau"][idx])
-                    else:
-                        tau_cmd = 0.0
-                    p.setJointMotorControl2(
-                        robot.robot_id, joint_idx,
-                        p.TORQUE_CONTROL,
-                        force=tau_cmd,
-                    )
+        safe_targets = initial_dof_angles.copy()
+        lift_progress = 0.0
+        if use_mpc_wbc:
+            lift_progress = min(1.0, max(0.0, (t - LIFT_TIME) / SWING_RAMP_TIME))
+            if "left_hip_pitch_joint" in joint_name_to_dof_idx:
+                safe_targets[joint_name_to_dof_idx["left_hip_pitch_joint"]] = (
+                    SWING_HIP_PITCH_TARGET * lift_progress
+                )
+            if "left_knee_joint" in joint_name_to_dof_idx:
+                safe_targets[joint_name_to_dof_idx["left_knee_joint"]] = (
+                    SWING_KNEE_TARGET * lift_progress
+                )
+
+        safe_tau = compute_pd_torque(
+            initial_dof_angles,
+            joint_positions,
+            joint_velocities,
+            POSTURE_KP,
+            POSTURE_KD,
+            tau_max_limits,
+        )
+        if left_leg_dof_indices:
+            left_leg_dof_indices_arr = np.array(left_leg_dof_indices, dtype=int)
+            safe_tau[left_leg_dof_indices_arr] = compute_pd_torque(
+                safe_targets[left_leg_dof_indices_arr],
+                joint_positions[left_leg_dof_indices_arr],
+                joint_velocities[left_leg_dof_indices_arr],
+                LIFT_LEG_KP,
+                LIFT_LEG_KD,
+                tau_max_limits[left_leg_dof_indices_arr],
+            )
+
+        if not use_mpc_wbc:
+            robot.set_joint_torques(safe_tau)
+        else:
+            support_mask = np.ones(robot.num_joints, dtype=bool)
+            support_mask[left_leg_dof_indices] = False
+            tau_cmd = safe_tau.copy()
+            support_contact = next(
+                (fc for fc in foot_contacts if fc["link"] == support_foot_link),
+                None,
+            )
+            support_force = (
+                support_contact["normal_force"] if support_contact is not None else 0.0
+            )
+            support_contact_ready = support_force >= MIN_SUPPORT_FORCE
+            if wbc_result is not None and support_contact_ready:
+                last_valid_support_tau = np.clip(
+                    wbc_result["tau"][support_mask],
+                    tau_min_limits[support_mask],
+                    tau_max_limits[support_mask],
+                )
+            elif last_valid_support_tau is None:
+                last_valid_support_tau = safe_tau[support_mask].copy()
+
+            effective_alpha = transition_alpha if support_contact_ready else 0.0
+            tau_cmd[support_mask] = (
+                (1.0 - effective_alpha) * safe_tau[support_mask]
+                + effective_alpha * last_valid_support_tau
+            )
+
+            if (wbc_result is None or not support_contact_ready) and step - last_wbc_warn_step >= 60:
+                J_c_lin = J_c[:3, :] if 'J_c' in locals() else np.zeros((3, robot.nv))
+                J_c_gram = J_c_lin @ J_c_lin.T
+                J_c_cond = np.linalg.cond(J_c_gram + 1e-6 * np.eye(3))
+                fallback_reason = (
+                    f"support force below threshold ({support_force:.1f}N)"
+                    if not support_contact_ready
+                    else f"solver status={wbc.last_status}"
+                )
+                print(
+                    f"[WARN] t={t:.3f}s using fallback support torque: {fallback_reason}, "
+                    f"support={FOOT_LINK_NAMES[candidate_foot_links.index(support_foot_link)]}, "
+                    f"force={support_force:.1f}N, alpha={effective_alpha:.2f}, "
+                    f"rank(Jc)={np.linalg.matrix_rank(J_c_lin)}, "
+                    f"cond(JcJc^T)={J_c_cond:.2e}, f_ref={format_vector(f_ref)}"
+                )
+                last_wbc_warn_step = step
+            robot.set_joint_torques(tau_cmd)
 
         # -----------------------------------------------------------------
         # 4.6 单步仿真推进
         # -----------------------------------------------------------------
-        p.stepSimulation()
+        robot.step()
         step += 1
 
         # -----------------------------------------------------------------
@@ -383,9 +491,6 @@ def main():
 
     if len(tau_log) > 0:
         plot_torques(time_log, tau_log)
-
-    p.disconnect()
-
 
 if __name__ == "__main__":
     main()

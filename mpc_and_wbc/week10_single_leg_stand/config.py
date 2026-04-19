@@ -1,11 +1,11 @@
-"""Week 10 实验配置：PyBullet 单腿站立（MPC-WBC 闭环验证）"""
+"""Week 10 experiment config: MuJoCo single-leg stand (MPC-WBC closed loop)."""
 
 import numpy as np
 
 # ---------------------------------------------------------------------------
 # 仿真环境参数
 # ---------------------------------------------------------------------------
-DT_SIM = 1.0 / 240.0          # PyBullet 默认物理步长 [s]
+DT_SIM = 1.0 / 240.0          # Simulation step [s]
 WBC_FREQ = 1000               # WBC 控制频率 [Hz]
 MPC_FREQ = 20                 # MPC 重求解频率 [Hz] (= 50 ms 周期)
 SIM_DURATION = 3.0            # 总仿真时长 [s]
@@ -15,7 +15,7 @@ MU = 0.8                      # 地面摩擦系数
 # ---------------------------------------------------------------------------
 # 机器人模型参数
 # ---------------------------------------------------------------------------
-URDF_PATH = "/home/ccc/projects/unitree_ros/robots/g1_description/g1_23dof.urdf" 
+MODEL_PATH = "/home/ccc/projects/unitree_ros/robots/g1_description/g1_23dof.xml"
 INITIAL_POSE = "standing"     # 初始姿势：双脚站立
 LIFT_LEG = "left"             # t=0.5s 抬起的腿
 LIFT_TIME = 0.5               # 抬腿时刻 [s]
@@ -26,6 +26,7 @@ FOOT_LINK_NAMES = [
     "left_ankle_roll_link",
     "right_ankle_roll_link",
 ]
+SUPPORT_FOOT_NAME = "right_ankle_roll_link" if LIFT_LEG == "left" else "left_ankle_roll_link"
 
 # 初始站立姿态（弧度）
 # 先测试零位姿态，观察稳定性后再微调
@@ -62,6 +63,20 @@ STANDING_JOINT_ANGLES = {
 # 基座初始位姿
 BASE_INITIAL_POS = np.array([0.0, 0.0, 0.697])      # 零位下 foot-to-base ≈ 0.697 m
 BASE_INITIAL_ORN = np.array([0.0, 0.0, 0.0, 1.0])   # [qx, qy, qz, qw]
+
+# ---------------------------------------------------------------------------
+# Actuator layer
+# ---------------------------------------------------------------------------
+POSTURE_KP = 200.0
+POSTURE_KD = 12.0
+LIFT_LEG_KP = 120.0
+LIFT_LEG_KD = 8.0
+TRANSITION_BLEND_TIME = 0.15
+SWING_RAMP_TIME = 0.8
+SWING_HIP_PITCH_TARGET = 0.15
+SWING_KNEE_TARGET = -0.3
+SUPPORT_POINT_FILTER = 0.1
+MIN_SUPPORT_FORCE = 50.0
 
 # ---------------------------------------------------------------------------
 # MPC 参数
