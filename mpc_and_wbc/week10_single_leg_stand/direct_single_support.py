@@ -166,6 +166,52 @@ def clip_corner_patch_cop_target(
     return clipped_world, clipped_local
 
 
+def apply_measured_cop_feedback(
+    local_positions: list[np.ndarray | None],
+    foot_origin: np.ndarray,
+    foot_rotation: np.ndarray,
+    nominal_cop_world: np.ndarray,
+    measured_cop_world: np.ndarray,
+    measured_cop_velocity_world: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Shift the desired CoP using measured CoP error while staying inside the patch."""
+    clipped_nominal_world, nominal_local = clip_corner_patch_cop_target(
+        local_positions,
+        foot_origin,
+        foot_rotation,
+        nominal_cop_world,
+    )
+    if len(local_positions) != 4 or any(pos is None for pos in local_positions):
+        return clipped_nominal_world, nominal_local
+
+    _, measured_local = clip_corner_patch_cop_target(
+        local_positions,
+        foot_origin,
+        foot_rotation,
+        measured_cop_world,
+    )
+    measured_velocity_local = foot_rotation.T @ measured_cop_velocity_world
+    local_correction = np.zeros(3, dtype=float)
+    local_correction[:2] = (
+        config.DIRECT_SINGLE_SUPPORT_COP_FEEDBACK_KP
+        * (nominal_local[:2] - measured_local[:2])
+        - config.DIRECT_SINGLE_SUPPORT_COP_FEEDBACK_KD * measured_velocity_local[:2]
+    )
+    local_correction[:2] = np.clip(
+        local_correction[:2],
+        -config.DIRECT_SINGLE_SUPPORT_COP_FEEDBACK_MAX_OFFSET,
+        config.DIRECT_SINGLE_SUPPORT_COP_FEEDBACK_MAX_OFFSET,
+    )
+    corrected_local = nominal_local + local_correction
+    corrected_world, corrected_local = clip_corner_patch_cop_target(
+        local_positions,
+        foot_origin,
+        foot_rotation,
+        foot_origin + foot_rotation @ corrected_local,
+    )
+    return corrected_world, corrected_local
+
+
 def build_corner_patch_wrench_task(
     local_positions: list[np.ndarray | None],
     foot_origin: np.ndarray,
@@ -290,6 +336,9 @@ def run_direct_single_support() -> DirectSingleSupportResult:
     state0 = estimator.update(preferred_support_foot_link=support_link, lock_support=True)
     c_ref = state0["c"].copy()
     support_total_normal_force = -config.GRAVITY[2] * robot.total_mass
+    initial_support_metrics = robot.get_contact_metrics(support_link)
+    filtered_cop_world = np.array(initial_support_metrics["cop_position"], copy=True)
+    prev_filtered_cop_world = filtered_cop_world.copy()
 
     total_steps = int(config.DIRECT_SINGLE_SUPPORT_DURATION / config.DT_SIM)
     wbc_failures = 0
@@ -309,6 +358,15 @@ def run_direct_single_support() -> DirectSingleSupportResult:
     print(f"support blend: {config.DIRECT_SINGLE_SUPPORT_SUPPORT_BLEND:.3f}")
     print(f"contact point: {config.DIRECT_SINGLE_SUPPORT_WBC_CONTACT_POINT}")
     print(f"CoP target: {config.DIRECT_SINGLE_SUPPORT_COP_TARGET}")
+    print(f"CoP feedback: {config.DIRECT_SINGLE_SUPPORT_COP_FEEDBACK_ENABLED}")
+    if config.DIRECT_SINGLE_SUPPORT_COP_FEEDBACK_ENABLED:
+        print(
+            "CoP feedback gains: "
+            f"alpha={config.DIRECT_SINGLE_SUPPORT_COP_FEEDBACK_FILTER_ALPHA:.3f}, "
+            f"kp={config.DIRECT_SINGLE_SUPPORT_COP_FEEDBACK_KP:.3f}, "
+            f"kd={config.DIRECT_SINGLE_SUPPORT_COP_FEEDBACK_KD:.3f}, "
+            f"max_offset={1000.0 * config.DIRECT_SINGLE_SUPPORT_COP_FEEDBACK_MAX_OFFSET:.1f}mm"
+        )
     print(f"wrench objective: {config.DIRECT_SINGLE_SUPPORT_USE_WRENCH_OBJECTIVE}")
     print("=" * 50)
 
@@ -356,11 +414,32 @@ def run_direct_single_support() -> DirectSingleSupportResult:
             )
             foot_origin = np.array(robot.data.xpos[support_link], copy=True)
             foot_rotation = np.array(robot.data.xmat[support_link]).reshape(3, 3)
-            cop_target_world = resolve_support_cop_target_world(
+            support_metrics_pre = robot.get_contact_metrics(support_link)
+            if support_metrics_pre["normal_force"] > 1e-6:
+                measured_cop_world = np.array(support_metrics_pre["cop_position"], copy=True)
+                filtered_cop_world = (
+                    config.DIRECT_SINGLE_SUPPORT_COP_FEEDBACK_FILTER_ALPHA * measured_cop_world
+                    + (1.0 - config.DIRECT_SINGLE_SUPPORT_COP_FEEDBACK_FILTER_ALPHA) * filtered_cop_world
+                )
+            measured_cop_velocity_world = (
+                filtered_cop_world - prev_filtered_cop_world
+            ) / config.DT_SIM
+            prev_filtered_cop_world = filtered_cop_world.copy()
+            nominal_cop_target_world = resolve_support_cop_target_world(
                 state,
                 c_ref,
                 initial_support_contact,
             )
+            cop_target_world = nominal_cop_target_world
+            if config.DIRECT_SINGLE_SUPPORT_COP_FEEDBACK_ENABLED:
+                cop_target_world, _ = apply_measured_cop_feedback(
+                    support_contact_local_positions,
+                    foot_origin,
+                    foot_rotation,
+                    nominal_cop_target_world,
+                    filtered_cop_world,
+                    measured_cop_velocity_world,
+                )
             if config.DIRECT_SINGLE_SUPPORT_USE_WRENCH_OBJECTIVE:
                 f_ref = np.tile(
                     np.array(
