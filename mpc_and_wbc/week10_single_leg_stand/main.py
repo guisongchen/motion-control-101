@@ -21,6 +21,8 @@ from config import (
     INIT_SETTLE_TIME, DOUBLE_SUPPORT_READY_TIME, LOAD_SHIFT_TIME,
     PRE_LIFTOFF_TIME, DOUBLE_SUPPORT_MIN_FORCE, PRE_LIFTOFF_SWING_PROGRESS,
     LOAD_SHIFT_ROLL_DELTA, PRE_LIFTOFF_EXTRA_ROLL_DELTA,
+    PRE_LIFTOFF_EXTRA_SWING_PROGRESS,
+    PRE_LIFTOFF_SWING_KP_SCALE, PRE_LIFTOFF_SWING_KD_SCALE,
     LOAD_SHIFT_SUPPORT_RATIO, PRE_LIFTOFF_SUPPORT_RATIO,
     LOAD_SHIFT_COM_RATIO, PRE_LIFTOFF_COM_RATIO,
     PRE_LIFTOFF_SWING_FORCE_MAX, COM_VEL_READY_THRESH,
@@ -162,13 +164,38 @@ def phase_elapsed(phase_state: PhaseState, t: float) -> float:
     return t - phase_state.phase_start_time
 
 
-def compute_swing_progress(phase_state: PhaseState, t: float) -> float:
+def compute_preliftoff_unload(
+    phase_state: PhaseState,
+    t: float,
+    load_shift_metrics: LoadShiftMetrics,
+) -> float:
+    """Compute how strongly PRE_LIFTOFF should unload the swing foot."""
+    if phase_state.phase != ControlPhase.PRE_LIFTOFF:
+        return 0.0
+    elapsed = phase_elapsed(phase_state, t)
+    time_progress = min(1.0, elapsed / max(PRE_LIFTOFF_TIME, 1e-6))
+    force_ratio = min(
+        1.0, load_shift_metrics.swing_force / max(2.0 * PRE_LIFTOFF_SWING_FORCE_MAX, 1e-6)
+    )
+    slip_guard = max(
+        0.0, 1.0 - load_shift_metrics.swing_slip / max(SLIP_THRESH, 1e-6)
+    )
+    return time_progress * force_ratio * slip_guard
+
+
+def compute_swing_progress(
+    phase_state: PhaseState,
+    t: float,
+    load_shift_metrics: LoadShiftMetrics,
+) -> float:
     """Compute normalized swing progress based on the active phase."""
     elapsed = phase_elapsed(phase_state, t)
     if phase_state.phase in (ControlPhase.INIT_SETTLE, ControlPhase.DOUBLE_SUPPORT_HOLD, ControlPhase.LOAD_SHIFT):
         return 0.0
     if phase_state.phase == ControlPhase.PRE_LIFTOFF:
-        return PRE_LIFTOFF_SWING_PROGRESS * min(1.0, elapsed / PRE_LIFTOFF_TIME)
+        base_progress = PRE_LIFTOFF_SWING_PROGRESS * min(1.0, elapsed / max(PRE_LIFTOFF_TIME, 1e-6))
+        unload_progress = compute_preliftoff_unload(phase_state, t, load_shift_metrics)
+        return min(0.6, base_progress + PRE_LIFTOFF_EXTRA_SWING_PROGRESS * unload_progress)
     single_support_progress = elapsed / SWING_RAMP_TIME
     return min(1.0, PRE_LIFTOFF_SWING_PROGRESS + (1.0 - PRE_LIFTOFF_SWING_PROGRESS) * single_support_progress)
 
@@ -284,7 +311,7 @@ def build_safe_targets(
 ) -> np.ndarray:
     """Build posture targets for the current phase."""
     targets = initial_dof_angles.copy()
-    swing_progress = compute_swing_progress(phase_state, t)
+    swing_progress = compute_swing_progress(phase_state, t, load_shift_metrics)
     load_shift_progress = compute_load_shift_progress(phase_state, t)
     hip_name = f"{swing_leg}_hip_pitch_joint"
     knee_name = f"{swing_leg}_knee_joint"
@@ -346,6 +373,9 @@ def compute_safe_tau(
     tau_min_limits: np.ndarray,
     tau_max_limits: np.ndarray,
     swing_leg_dof_indices: list[int],
+    phase_state: PhaseState,
+    t: float,
+    load_shift_metrics: LoadShiftMetrics,
 ) -> np.ndarray:
     """Build posture-hold torques with bias-force compensation."""
     safe_tau = C_safe[6:] + compute_pd_torque(
@@ -359,14 +389,17 @@ def compute_safe_tau(
 
     if swing_leg_dof_indices:
         swing_idx = np.array(swing_leg_dof_indices, dtype=int)
+        unload_progress = compute_preliftoff_unload(phase_state, t, load_shift_metrics)
+        swing_kp_scale = 1.0 - unload_progress * (1.0 - PRE_LIFTOFF_SWING_KP_SCALE)
+        swing_kd_scale = 1.0 - unload_progress * (1.0 - PRE_LIFTOFF_SWING_KD_SCALE)
         safe_tau[swing_idx] = (
             C_safe[6:][swing_idx]
             + compute_pd_torque(
                 safe_targets[swing_idx],
                 joint_positions[swing_idx],
                 joint_velocities[swing_idx],
-                LIFT_LEG_KP,
-                LIFT_LEG_KD,
+                LIFT_LEG_KP * swing_kp_scale,
+                LIFT_LEG_KD * swing_kd_scale,
                 tau_max_limits[swing_idx],
             )
         )
@@ -717,6 +750,9 @@ def main():
             tau_min_limits,
             tau_max_limits,
             swing_leg_dof_indices,
+            phase_state,
+            t,
+            load_shift_metrics,
         )
 
         if not use_wbc:
@@ -808,7 +844,8 @@ def main():
                 f"com_shift={load_shift_metrics.com_shift_ratio:.2f}  "
                 f"swing_force={load_shift_metrics.swing_force:.1f}N  "
                 f"com_speed={load_shift_metrics.com_speed:.3f}m/s  "
-                f"swing_slip={load_shift_metrics.swing_slip*1000:.2f}mm"
+                f"swing_slip={load_shift_metrics.swing_slip*1000:.2f}mm  "
+                f"unload={compute_preliftoff_unload(phase_state, t, load_shift_metrics):.2f}"
             )
             for fc in foot_contacts:
                 link_name = support_name(candidate_foot_links, fc["link"])
