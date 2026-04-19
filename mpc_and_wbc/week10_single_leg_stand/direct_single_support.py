@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 import math
 
+import mujoco
 import numpy as np
 
 import config
@@ -65,20 +66,93 @@ def build_direct_pose(
     return q_target
 
 
-def resolve_support_contact_local_position(
+def resolve_support_contact_local_positions(
     robot: RobotModel,
     support_link: int,
     initial_support_contact: np.ndarray,
-) -> np.ndarray | None:
-    """Pick the foot point whose acceleration WBC constrains to zero."""
+) -> list[np.ndarray | None]:
+    """Pick the support-foot points whose accelerations WBC constrains to zero."""
     mode = config.DIRECT_SINGLE_SUPPORT_WBC_CONTACT_POINT
     if mode == "body_origin":
-        return None
+        return [None]
     if mode == "initial_contact":
         body_origin = np.array(robot.data.xpos[support_link], copy=True)
         body_rotation = np.array(robot.data.xmat[support_link]).reshape(3, 3)
-        return body_rotation.T @ (initial_support_contact - body_origin)
+        return [body_rotation.T @ (initial_support_contact - body_origin)]
+    if mode == "corner_patch":
+        local_positions: list[np.ndarray] = []
+        for geom_id in range(robot.model.ngeom):
+            if int(robot.model.geom_bodyid[geom_id]) != support_link:
+                continue
+            if int(robot.model.geom_type[geom_id]) != mujoco.mjtGeom.mjGEOM_SPHERE:
+                continue
+            local_positions.append(np.array(robot.model.geom_pos[geom_id], copy=True))
+        if not local_positions:
+            raise ValueError(
+                f"No corner-patch sphere geoms found on support body {support_link}."
+            )
+        return sorted(local_positions, key=lambda pos: (pos[0], pos[1]))
     raise ValueError(f"Unsupported direct single-support contact point mode: {mode}")
+
+
+def compute_corner_patch_force_reference(
+    local_positions: list[np.ndarray | None],
+    foot_origin: np.ndarray,
+    foot_rotation: np.ndarray,
+    cop_world: np.ndarray,
+    total_normal_force: float,
+) -> np.ndarray:
+    """Distribute normal load across the four sole corners to realize a desired CoP."""
+    if len(local_positions) != 4 or any(pos is None for pos in local_positions):
+        return np.tile(
+            np.array([0.0, 0.0, total_normal_force / len(local_positions)], dtype=float),
+            len(local_positions),
+        )
+
+    corner_positions = [np.asarray(pos, dtype=float) for pos in local_positions]
+    cop_local = foot_rotation.T @ (cop_world - foot_origin)
+    x_coords = np.array([pos[0] for pos in corner_positions])
+    y_coords = np.array([pos[1] for pos in corner_positions])
+    x_min = float(np.min(x_coords)) + config.DIRECT_SINGLE_SUPPORT_COP_MARGIN
+    x_max = float(np.max(x_coords)) - config.DIRECT_SINGLE_SUPPORT_COP_MARGIN
+    y_min = float(np.min(y_coords)) + config.DIRECT_SINGLE_SUPPORT_COP_MARGIN
+    y_max = float(np.max(y_coords)) - config.DIRECT_SINGLE_SUPPORT_COP_MARGIN
+
+    target_x = float(np.clip(cop_local[0], x_min, x_max))
+    target_y = float(np.clip(cop_local[1], y_min, y_max))
+    x_alpha = (target_x - x_min) / max(x_max - x_min, 1e-6)
+    y_alpha = (target_y - y_min) / max(y_max - y_min, 1e-6)
+    weights = np.array(
+        [
+            (1.0 - x_alpha) * (1.0 - y_alpha),
+            (1.0 - x_alpha) * y_alpha,
+            x_alpha * (1.0 - y_alpha),
+            x_alpha * y_alpha,
+        ],
+        dtype=float,
+    )
+    weights /= np.sum(weights)
+
+    f_ref = np.zeros(3 * len(corner_positions), dtype=float)
+    for contact_idx, weight in enumerate(weights):
+        f_ref[3 * contact_idx + 2] = weight * total_normal_force
+    return f_ref
+
+
+def resolve_support_cop_target_world(
+    state: dict,
+    c_ref: np.ndarray,
+    initial_support_contact: np.ndarray,
+) -> np.ndarray:
+    """Choose the world-frame CoP target used to bias the patch force reference."""
+    mode = config.DIRECT_SINGLE_SUPPORT_COP_TARGET
+    if mode == "initial_contact":
+        return initial_support_contact
+    if mode == "support_com_ref":
+        return c_ref
+    if mode == "current_com":
+        return state["c"]
+    raise ValueError(f"Unsupported direct single-support CoP target mode: {mode}")
 
 
 def run_direct_single_support() -> DirectSingleSupportResult:
@@ -111,14 +185,6 @@ def run_direct_single_support() -> DirectSingleSupportResult:
     support_link = robot.link_name_to_index[config.DIRECT_SINGLE_SUPPORT_SUPPORT_FOOT_NAME]
     swing_link = next(link for link in candidate_foot_links if link != support_link)
     estimator = StateEstimator(robot, candidate_foot_links)
-    controller = WholeBodyController(robot.nv)
-
-    swing_leg_dof_indices = [
-        robot.dof_joint_name_to_index[name]
-        for name in get_leg_joint_names(swing_leg)
-        if name in robot.dof_joint_name_to_index
-    ]
-
     original_gains = (
         wbc_module.Kp_c,
         wbc_module.Kd_c,
@@ -132,9 +198,22 @@ def run_direct_single_support() -> DirectSingleSupportResult:
 
     initial_support_contact = robot.get_contact_metrics(support_link)["position"].copy()
     initial_support_body = robot.get_link_com_position(support_link).copy()
+    support_contact_local_positions = resolve_support_contact_local_positions(
+        robot,
+        support_link,
+        initial_support_contact,
+    )
+    controller = WholeBodyController(robot.nv, num_contacts=len(support_contact_local_positions))
+
+    swing_leg_dof_indices = [
+        robot.dof_joint_name_to_index[name]
+        for name in get_leg_joint_names(swing_leg)
+        if name in robot.dof_joint_name_to_index
+    ]
+
     state0 = estimator.update(preferred_support_foot_link=support_link, lock_support=True)
     c_ref = state0["c"].copy()
-    f_ref = np.array([0.0, 0.0, -config.GRAVITY[2] * robot.total_mass], dtype=float)
+    support_total_normal_force = -config.GRAVITY[2] * robot.total_mass
 
     total_steps = int(config.DIRECT_SINGLE_SUPPORT_DURATION / config.DT_SIM)
     wbc_failures = 0
@@ -152,14 +231,10 @@ def run_direct_single_support() -> DirectSingleSupportResult:
     print(f"damping scale: {config.DIRECT_SINGLE_SUPPORT_DAMPING_SCALE:.2f}")
     print(f"support blend: {config.DIRECT_SINGLE_SUPPORT_SUPPORT_BLEND:.3f}")
     print(f"contact point: {config.DIRECT_SINGLE_SUPPORT_WBC_CONTACT_POINT}")
+    print(f"CoP target: {config.DIRECT_SINGLE_SUPPORT_COP_TARGET}")
     print("=" * 50)
 
     try:
-        support_contact_local_position = resolve_support_contact_local_position(
-            robot,
-            support_link,
-            initial_support_contact,
-        )
         for step in range(total_steps):
             state = estimator.update(preferred_support_foot_link=support_link, lock_support=True)
             q = state["q"]
@@ -176,10 +251,15 @@ def run_direct_single_support() -> DirectSingleSupportResult:
             )
 
             M = robot.compute_mass_matrix(q)
-            J_c = robot.get_foot_jacobian(
-                support_link,
-                q,
-                local_position=support_contact_local_position,
+            J_c = np.vstack(
+                [
+                    robot.get_foot_jacobian(
+                        support_link,
+                        q,
+                        local_position=local_position,
+                    )
+                    for local_position in support_contact_local_positions
+                ]
             )
             J_com = robot.get_com_jacobian(q)
             J_L = robot.get_angular_momentum_jacobian(q)
@@ -195,6 +275,20 @@ def run_direct_single_support() -> DirectSingleSupportResult:
                 state["L"],
                 np.zeros(3),
                 np.zeros(3),
+            )
+            foot_origin = np.array(robot.data.xpos[support_link], copy=True)
+            foot_rotation = np.array(robot.data.xmat[support_link]).reshape(3, 3)
+            cop_target_world = resolve_support_cop_target_world(
+                state,
+                c_ref,
+                initial_support_contact,
+            )
+            f_ref = compute_corner_patch_force_reference(
+                support_contact_local_positions,
+                foot_origin,
+                foot_rotation,
+                cop_target_world,
+                support_total_normal_force,
             )
             wbc_result = controller.solve(
                 M,

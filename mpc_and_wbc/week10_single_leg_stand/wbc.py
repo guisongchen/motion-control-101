@@ -1,9 +1,11 @@
 """WBC QP 构造与求解"""
 
+from typing import Optional
+
 import numpy as np
 import osqp
 from scipy import sparse
-from typing import Optional
+
 from config import GRAVITY, MU, Kp_c, Kd_c, Kp_L, Kd_L, W1, W2, W3, W4
 from utils import build_friction_cone_matrix
 
@@ -11,13 +13,15 @@ from utils import build_friction_cone_matrix
 class WholeBodyController:
     """全身控制器：将 MPC 参考转化为关节力矩。"""
 
-    def __init__(self, nv: int):
+    def __init__(self, nv: int, num_contacts: int = 1):
         """
         Args:
             nv: 广义速度维度 (n+6)
+            num_contacts: 线性接触点数量，每个接触点使用 3 维接触力。
         """
         self.nv = nv
-        self.nf = 3               # 单支撑只有 1 个接触点，3 维线力
+        self.num_contacts = num_contacts
+        self.nf = 3 * self.num_contacts
         self.nz = self.nv + self.nf   # 决策变量 z = [v_dot; f]
         self.n_dof = nv - 6
 
@@ -27,6 +31,35 @@ class WholeBodyController:
         self.last_status_val = None
 
         self._build_qp_matrices()
+
+    def _linear_contact_jacobian(self, J_c: np.ndarray) -> np.ndarray:
+        """Extract stacked 3D linear Jacobians for each modeled contact point."""
+        expected_linear_rows = 3 * self.num_contacts
+        expected_spatial_rows = 6 * self.num_contacts
+        if J_c.shape == (expected_linear_rows, self.nv):
+            return J_c
+        if J_c.shape == (expected_spatial_rows, self.nv):
+            return np.vstack(
+                [
+                    J_c[6 * contact_idx : 6 * contact_idx + 3, :]
+                    for contact_idx in range(self.num_contacts)
+                ]
+            )
+        raise ValueError(
+            f"Unexpected contact Jacobian shape {J_c.shape}; expected "
+            f"({expected_linear_rows}, {self.nv}) or ({expected_spatial_rows}, {self.nv})."
+        )
+
+    def _force_weight_matrix(self) -> np.ndarray:
+        """Expand the configured force regularization to match the contact count."""
+        if W3.shape == (self.nf, self.nf):
+            return W3
+        if W3.shape == (3, 3):
+            return sparse.block_diag([W3] * self.num_contacts, format="csc").toarray()
+        raise ValueError(
+            f"W3 must be shape (3, 3) or ({self.nf}, {self.nf}) for {self.num_contacts} contacts; "
+            f"got {W3.shape}."
+        )
 
     def _build_qp_matrices(self):
         """
@@ -39,8 +72,8 @@ class WholeBodyController:
         nz = self.nz
 
         # 约束数
-        n_slip = 3      # 无滑动：接触点线加速度为 0
-        n_fcon = 4      # 摩擦锥
+        n_slip = 3 * self.num_contacts      # 无滑动：各接触点线加速度为 0
+        n_fcon = 4 * self.num_contacts      # 每个接触点一个四面摩擦锥
         n_tau = n_dof   # 力矩限幅（双边）
         n_constr = n_slip + n_fcon + n_tau
 
@@ -57,10 +90,13 @@ class WholeBodyController:
             for j in range(nv):
                 A_dok[i, j] = 1.0
 
-        # 2) 摩擦锥约束 (行 3:7, 列 nv:nv+nf) — 固定
-        for i in range(4):
-            for j in range(nf):
-                A_dok[n_slip + i, nv + j] = self.A_fcon[i, j]
+        # 2) 摩擦锥约束 — 对每个接触点复制
+        for contact_idx in range(self.num_contacts):
+            row_offset = n_slip + 4 * contact_idx
+            col_offset = nv + 3 * contact_idx
+            for i in range(4):
+                for j in range(3):
+                    A_dok[row_offset + i, col_offset + j] = self.A_fcon[i, j]
 
         # 3) 力矩限幅占位 (行 7:7+n_dof, 列 0:nv 和 nv:nz)
         for i in range(n_dof):
@@ -134,21 +170,22 @@ class WholeBodyController:
         """
         nv, nf, n_dof = self.nv, self.nf, self.n_dof
         nz = self.nz
-        n_slip = 3
-        n_fcon = 4
+        n_slip = 3 * self.num_contacts
+        n_fcon = 4 * self.num_contacts
 
-        J_c_lin = J_c[:3, :]  # (3, nv) 线速度 Jacobian
+        J_c_lin = self._linear_contact_jacobian(J_c)
 
         # -----------------------------------------------------------------
         # 1. 更新 P, q
         # -----------------------------------------------------------------
         W4_mat = W4 * np.eye(nv)
         P_vv = J_com.T @ W1 @ J_com + J_L.T @ W2 @ J_L + W4_mat
-        P_ff = W3
+        W3_mat = self._force_weight_matrix()
+        P_ff = W3_mat
         P = sparse.block_diag([P_vv, P_ff], format="csc")
 
         q_v = -(J_com.T @ W1 @ c_ddot_des + J_L.T @ W2 @ L_dot_des)
-        q_f = -W3 @ f_ref
+        q_f = -W3_mat @ f_ref
         q = np.concatenate([q_v, q_f])
 
         # -----------------------------------------------------------------
