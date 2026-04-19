@@ -289,3 +289,42 @@ class RobotModel:
             is_contact = True
 
         return is_contact, normal_force
+
+    def get_contact_metrics(self, link_index: int, other_body_id: int = -1) -> dict:
+        """Aggregate contact centroid and wrench magnitudes for one body."""
+        is_contact = False
+        normal_force = 0.0
+        tangential_force = 0.0
+        positions = []
+        for contact_id in range(self.data.ncon):
+            contact = self.data.contact[contact_id]
+            body1 = int(self.model.geom_bodyid[int(contact.geom1)])
+            body2 = int(self.model.geom_bodyid[int(contact.geom2)])
+            if link_index not in (body1, body2):
+                continue
+
+            other_body = body2 if body1 == link_index else body1
+            if other_body_id >= 0 and other_body != other_body_id:
+                continue
+
+            wrench = np.zeros(6)
+            mujoco.mj_contactForce(self.model, self.data, contact_id, wrench)
+            normal_force += max(0.0, float(wrench[0]))
+            tangential_force += float(np.linalg.norm(wrench[1:3]))
+            positions.append(np.array(contact.pos[:3], copy=True))
+            is_contact = True
+
+        if positions:
+            position = np.mean(positions, axis=0)
+        else:
+            position = self.get_link_com_position(link_index)
+
+        friction_ratio = tangential_force / max(normal_force, 1e-6)
+        return {
+            "is_contact": is_contact,
+            "normal_force": normal_force,
+            "tangential_force": tangential_force,
+            "friction_ratio": friction_ratio,
+            "position": position,
+            "contact_count": len(positions),
+        }
