@@ -33,6 +33,16 @@ def quat_from_roll(roll: float) -> np.ndarray:
     return np.array([math.sin(roll / 2.0), 0.0, 0.0, math.cos(roll / 2.0)], dtype=float)
 
 
+def wrap_to_pi(angle: float) -> float:
+    """Wrap an angle to [-pi, pi]."""
+    return math.atan2(math.sin(angle), math.cos(angle))
+
+
+def yaw_from_rotation(rotation: np.ndarray) -> float:
+    """Extract world yaw from a rotation matrix."""
+    return math.atan2(rotation[1, 0], rotation[0, 0])
+
+
 def build_direct_pose(
     joint_names: list[str],
     support_leg: str,
@@ -218,10 +228,14 @@ def build_corner_patch_wrench_task(
     foot_rotation: np.ndarray,
     cop_world: np.ndarray,
     total_normal_force: float,
+    desired_force_xy_world: np.ndarray | None = None,
+    desired_yaw_moment: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Build a support-wrench task for the 4-corner foot patch."""
     if len(local_positions) != 4 or any(pos is None for pos in local_positions):
         raise ValueError("Support wrench task requires four explicit corner contact points.")
+    if desired_force_xy_world is None:
+        desired_force_xy_world = np.zeros(2, dtype=float)
 
     clipped_world, _ = clip_corner_patch_cop_target(
         local_positions,
@@ -229,7 +243,7 @@ def build_corner_patch_wrench_task(
         foot_rotation,
         cop_world,
     )
-    task_matrix = np.zeros((5, 3 * len(local_positions)), dtype=float)
+    task_matrix = np.zeros((6, 3 * len(local_positions)), dtype=float)
     for contact_idx, local_position in enumerate(local_positions):
         world_position = foot_origin + foot_rotation @ np.asarray(local_position, dtype=float)
         r = world_position - foot_origin
@@ -237,15 +251,17 @@ def build_corner_patch_wrench_task(
         task_matrix[0:3, col : col + 3] = np.eye(3)
         task_matrix[3, col : col + 3] = np.array([0.0, -r[2], r[1]])
         task_matrix[4, col : col + 3] = np.array([r[2], 0.0, -r[0]])
+        task_matrix[5, col : col + 3] = np.array([-r[1], r[0], 0.0])
 
     cop_offset = clipped_world - foot_origin
     task_ref = np.array(
         [
-            0.0,
-            0.0,
+            desired_force_xy_world[0],
+            desired_force_xy_world[1],
             total_normal_force,
             cop_offset[1] * total_normal_force,
             -cop_offset[0] * total_normal_force,
+            desired_yaw_moment,
         ],
         dtype=float,
     )
@@ -256,9 +272,18 @@ def build_corner_patch_wrench_task(
             config.DIRECT_SINGLE_SUPPORT_WRENCH_FORCE_Z_WEIGHT,
             config.DIRECT_SINGLE_SUPPORT_WRENCH_MOMENT_WEIGHT,
             config.DIRECT_SINGLE_SUPPORT_WRENCH_MOMENT_WEIGHT,
+            config.DIRECT_SINGLE_SUPPORT_WRENCH_YAW_MOMENT_WEIGHT,
         ]
     )
     return task_matrix, task_ref, task_weight
+
+
+def compute_corner_patch_wrench_force_reference(
+    task_matrix: np.ndarray,
+    task_ref: np.ndarray,
+) -> np.ndarray:
+    """Project a desired aggregate wrench into a minimum-norm corner-force reference."""
+    return np.linalg.pinv(task_matrix) @ task_ref
 
 
 def resolve_support_cop_target_world(
@@ -339,6 +364,9 @@ def run_direct_single_support() -> DirectSingleSupportResult:
     initial_support_metrics = robot.get_contact_metrics(support_link)
     filtered_cop_world = np.array(initial_support_metrics["cop_position"], copy=True)
     prev_filtered_cop_world = filtered_cop_world.copy()
+    filtered_support_position_world = np.array(initial_support_metrics["position"], copy=True)
+    prev_filtered_support_position_world = filtered_support_position_world.copy()
+    initial_support_yaw = yaw_from_rotation(np.array(robot.data.xmat[support_link]).reshape(3, 3))
 
     total_steps = int(config.DIRECT_SINGLE_SUPPORT_DURATION / config.DT_SIM)
     wbc_failures = 0
@@ -368,6 +396,12 @@ def run_direct_single_support() -> DirectSingleSupportResult:
             f"max_offset={1000.0 * config.DIRECT_SINGLE_SUPPORT_COP_FEEDBACK_MAX_OFFSET:.1f}mm"
         )
     print(f"wrench objective: {config.DIRECT_SINGLE_SUPPORT_USE_WRENCH_OBJECTIVE}")
+    print(
+        "wrench regulation: "
+        f"force_xy_w={config.DIRECT_SINGLE_SUPPORT_WRENCH_FORCE_XY_WEIGHT:.3f}, "
+        f"moment_w={config.DIRECT_SINGLE_SUPPORT_WRENCH_MOMENT_WEIGHT:.3f}, "
+        f"yaw_w={config.DIRECT_SINGLE_SUPPORT_WRENCH_YAW_MOMENT_WEIGHT:.3f}"
+    )
     print("=" * 50)
 
     try:
@@ -421,10 +455,21 @@ def run_direct_single_support() -> DirectSingleSupportResult:
                     config.DIRECT_SINGLE_SUPPORT_COP_FEEDBACK_FILTER_ALPHA * measured_cop_world
                     + (1.0 - config.DIRECT_SINGLE_SUPPORT_COP_FEEDBACK_FILTER_ALPHA) * filtered_cop_world
                 )
+                measured_support_position_world = np.array(support_metrics_pre["position"], copy=True)
+                filtered_support_position_world = (
+                    config.DIRECT_SINGLE_SUPPORT_WRENCH_STATE_FILTER_ALPHA
+                    * measured_support_position_world
+                    + (1.0 - config.DIRECT_SINGLE_SUPPORT_WRENCH_STATE_FILTER_ALPHA)
+                    * filtered_support_position_world
+                )
             measured_cop_velocity_world = (
                 filtered_cop_world - prev_filtered_cop_world
             ) / config.DT_SIM
             prev_filtered_cop_world = filtered_cop_world.copy()
+            measured_support_slip_velocity_world = (
+                filtered_support_position_world - prev_filtered_support_position_world
+            ) / config.DT_SIM
+            prev_filtered_support_position_world = filtered_support_position_world.copy()
             nominal_cop_target_world = resolve_support_cop_target_world(
                 state,
                 c_ref,
@@ -440,24 +485,43 @@ def run_direct_single_support() -> DirectSingleSupportResult:
                     filtered_cop_world,
                     measured_cop_velocity_world,
                 )
-            if config.DIRECT_SINGLE_SUPPORT_USE_WRENCH_OBJECTIVE:
-                f_ref = np.tile(
-                    np.array(
-                        [
-                            0.0,
-                            0.0,
-                            support_total_normal_force / len(support_contact_local_positions),
-                        ],
-                        dtype=float,
-                    ),
-                    len(support_contact_local_positions),
+            support_slip_world = filtered_support_position_world - initial_support_contact
+            desired_force_xy_world = -(
+                config.DIRECT_SINGLE_SUPPORT_WRENCH_SLIP_FORCE_KP * support_slip_world[:2]
+                + config.DIRECT_SINGLE_SUPPORT_WRENCH_SLIP_FORCE_KD
+                * measured_support_slip_velocity_world[:2]
+            )
+            desired_force_xy_world = np.clip(
+                desired_force_xy_world,
+                -config.DIRECT_SINGLE_SUPPORT_WRENCH_SLIP_FORCE_MAX,
+                config.DIRECT_SINGLE_SUPPORT_WRENCH_SLIP_FORCE_MAX,
+            )
+            _, support_ang_vel = robot.get_link_velocity(support_link)
+            support_yaw_error = wrap_to_pi(yaw_from_rotation(foot_rotation) - initial_support_yaw)
+            desired_yaw_moment = -(
+                config.DIRECT_SINGLE_SUPPORT_WRENCH_YAW_MOMENT_KP * support_yaw_error
+                + config.DIRECT_SINGLE_SUPPORT_WRENCH_YAW_MOMENT_KD * support_ang_vel[2]
+            )
+            desired_yaw_moment = float(
+                np.clip(
+                    desired_yaw_moment,
+                    -config.DIRECT_SINGLE_SUPPORT_WRENCH_YAW_MOMENT_MAX,
+                    config.DIRECT_SINGLE_SUPPORT_WRENCH_YAW_MOMENT_MAX,
                 )
+            )
+            if config.DIRECT_SINGLE_SUPPORT_USE_WRENCH_OBJECTIVE:
                 force_task_matrix, force_task_ref, force_task_weight = build_corner_patch_wrench_task(
                     support_contact_local_positions,
                     foot_origin,
                     foot_rotation,
                     cop_target_world,
                     support_total_normal_force,
+                    desired_force_xy_world=desired_force_xy_world,
+                    desired_yaw_moment=desired_yaw_moment,
+                )
+                f_ref = compute_corner_patch_wrench_force_reference(
+                    force_task_matrix,
+                    force_task_ref,
                 )
             else:
                 f_ref = compute_corner_patch_force_reference(
