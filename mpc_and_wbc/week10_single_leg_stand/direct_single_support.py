@@ -20,6 +20,7 @@ class DirectSingleSupportResult:
     final_base_z: float
     max_contact_slip_mm: float
     max_body_slip_mm: float
+    max_cop_error_mm: float
     max_swing_force: float
     max_friction_ratio: float
     max_tangential_force: float
@@ -139,6 +140,81 @@ def compute_corner_patch_force_reference(
     return f_ref
 
 
+def clip_corner_patch_cop_target(
+    local_positions: list[np.ndarray | None],
+    foot_origin: np.ndarray,
+    foot_rotation: np.ndarray,
+    cop_world: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Project a desired CoP into the interior of the corner patch."""
+    if len(local_positions) != 4 or any(pos is None for pos in local_positions):
+        return np.asarray(cop_world, dtype=float), np.zeros(3)
+
+    corner_positions = [np.asarray(pos, dtype=float) for pos in local_positions]
+    cop_local = foot_rotation.T @ (cop_world - foot_origin)
+    x_coords = np.array([pos[0] for pos in corner_positions])
+    y_coords = np.array([pos[1] for pos in corner_positions])
+    x_min = float(np.min(x_coords)) + config.DIRECT_SINGLE_SUPPORT_COP_MARGIN
+    x_max = float(np.max(x_coords)) - config.DIRECT_SINGLE_SUPPORT_COP_MARGIN
+    y_min = float(np.min(y_coords)) + config.DIRECT_SINGLE_SUPPORT_COP_MARGIN
+    y_max = float(np.max(y_coords)) - config.DIRECT_SINGLE_SUPPORT_COP_MARGIN
+
+    clipped_local = cop_local.copy()
+    clipped_local[0] = np.clip(clipped_local[0], x_min, x_max)
+    clipped_local[1] = np.clip(clipped_local[1], y_min, y_max)
+    clipped_world = foot_origin + foot_rotation @ clipped_local
+    return clipped_world, clipped_local
+
+
+def build_corner_patch_wrench_task(
+    local_positions: list[np.ndarray | None],
+    foot_origin: np.ndarray,
+    foot_rotation: np.ndarray,
+    cop_world: np.ndarray,
+    total_normal_force: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Build a support-wrench task for the 4-corner foot patch."""
+    if len(local_positions) != 4 or any(pos is None for pos in local_positions):
+        raise ValueError("Support wrench task requires four explicit corner contact points.")
+
+    clipped_world, _ = clip_corner_patch_cop_target(
+        local_positions,
+        foot_origin,
+        foot_rotation,
+        cop_world,
+    )
+    task_matrix = np.zeros((5, 3 * len(local_positions)), dtype=float)
+    for contact_idx, local_position in enumerate(local_positions):
+        world_position = foot_origin + foot_rotation @ np.asarray(local_position, dtype=float)
+        r = world_position - foot_origin
+        col = 3 * contact_idx
+        task_matrix[0:3, col : col + 3] = np.eye(3)
+        task_matrix[3, col : col + 3] = np.array([0.0, -r[2], r[1]])
+        task_matrix[4, col : col + 3] = np.array([r[2], 0.0, -r[0]])
+
+    cop_offset = clipped_world - foot_origin
+    task_ref = np.array(
+        [
+            0.0,
+            0.0,
+            total_normal_force,
+            cop_offset[1] * total_normal_force,
+            -cop_offset[0] * total_normal_force,
+        ],
+        dtype=float,
+    )
+    task_weight = np.diag(
+        [
+            config.DIRECT_SINGLE_SUPPORT_WRENCH_FORCE_XY_WEIGHT,
+            config.DIRECT_SINGLE_SUPPORT_WRENCH_FORCE_XY_WEIGHT,
+            config.DIRECT_SINGLE_SUPPORT_WRENCH_FORCE_Z_WEIGHT,
+            config.DIRECT_SINGLE_SUPPORT_WRENCH_MOMENT_WEIGHT,
+            config.DIRECT_SINGLE_SUPPORT_WRENCH_MOMENT_WEIGHT,
+        ]
+    )
+    return task_matrix, task_ref, task_weight
+
+
 def resolve_support_cop_target_world(
     state: dict,
     c_ref: np.ndarray,
@@ -219,6 +295,7 @@ def run_direct_single_support() -> DirectSingleSupportResult:
     wbc_failures = 0
     max_contact_slip = 0.0
     max_body_slip = 0.0
+    max_cop_error = 0.0
     max_swing_force = 0.0
     max_friction_ratio = 0.0
     max_tangential_force = 0.0
@@ -232,6 +309,7 @@ def run_direct_single_support() -> DirectSingleSupportResult:
     print(f"support blend: {config.DIRECT_SINGLE_SUPPORT_SUPPORT_BLEND:.3f}")
     print(f"contact point: {config.DIRECT_SINGLE_SUPPORT_WBC_CONTACT_POINT}")
     print(f"CoP target: {config.DIRECT_SINGLE_SUPPORT_COP_TARGET}")
+    print(f"wrench objective: {config.DIRECT_SINGLE_SUPPORT_USE_WRENCH_OBJECTIVE}")
     print("=" * 50)
 
     try:
@@ -283,13 +361,36 @@ def run_direct_single_support() -> DirectSingleSupportResult:
                 c_ref,
                 initial_support_contact,
             )
-            f_ref = compute_corner_patch_force_reference(
-                support_contact_local_positions,
-                foot_origin,
-                foot_rotation,
-                cop_target_world,
-                support_total_normal_force,
-            )
+            if config.DIRECT_SINGLE_SUPPORT_USE_WRENCH_OBJECTIVE:
+                f_ref = np.tile(
+                    np.array(
+                        [
+                            0.0,
+                            0.0,
+                            support_total_normal_force / len(support_contact_local_positions),
+                        ],
+                        dtype=float,
+                    ),
+                    len(support_contact_local_positions),
+                )
+                force_task_matrix, force_task_ref, force_task_weight = build_corner_patch_wrench_task(
+                    support_contact_local_positions,
+                    foot_origin,
+                    foot_rotation,
+                    cop_target_world,
+                    support_total_normal_force,
+                )
+            else:
+                f_ref = compute_corner_patch_force_reference(
+                    support_contact_local_positions,
+                    foot_origin,
+                    foot_rotation,
+                    cop_target_world,
+                    support_total_normal_force,
+                )
+                force_task_matrix = None
+                force_task_ref = None
+                force_task_weight = None
             wbc_result = controller.solve(
                 M,
                 C,
@@ -303,6 +404,9 @@ def run_direct_single_support() -> DirectSingleSupportResult:
                 v,
                 -robot.tau_limits,
                 robot.tau_limits,
+                force_task_matrix=force_task_matrix,
+                force_task_ref=force_task_ref,
+                force_task_weight=force_task_weight,
             )
             if wbc_result is None:
                 wbc_failures += 1
@@ -327,6 +431,10 @@ def run_direct_single_support() -> DirectSingleSupportResult:
             support_metrics = robot.get_contact_metrics(support_link)
             swing_metrics = robot.get_contact_metrics(swing_link)
             support_body = robot.get_link_com_position(support_link)
+            max_cop_error = max(
+                max_cop_error,
+                float(np.linalg.norm(support_metrics["cop_position"][:2] - cop_target_world[:2])),
+            )
             max_contact_slip = max(
                 max_contact_slip,
                 float(np.linalg.norm(support_metrics["position"][:2] - initial_support_contact[:2])),
@@ -347,6 +455,7 @@ def run_direct_single_support() -> DirectSingleSupportResult:
                     f"t={final_t:.3f}s  "
                     f"base_z={final_base_z:.3f}  "
                     f"contact_slip={1000.0 * max_contact_slip:.2f}mm  "
+                    f"cop_error={1000.0 * max_cop_error:.2f}mm  "
                     f"swing_force={swing_metrics['normal_force']:.1f}N  "
                     f"friction_ratio={support_metrics['friction_ratio']:.3f}"
                 )
@@ -372,6 +481,7 @@ def run_direct_single_support() -> DirectSingleSupportResult:
         final_base_z=final_base_z,
         max_contact_slip_mm=1000.0 * max_contact_slip,
         max_body_slip_mm=1000.0 * max_body_slip,
+        max_cop_error_mm=1000.0 * max_cop_error,
         max_swing_force=max_swing_force,
         max_friction_ratio=max_friction_ratio,
         max_tangential_force=max_tangential_force,
@@ -387,6 +497,7 @@ def main() -> None:
     print(f"final base z: {result.final_base_z:.3f} m")
     print(f"max contact slip: {result.max_contact_slip_mm:.2f} mm")
     print(f"max body slip: {result.max_body_slip_mm:.2f} mm")
+    print(f"max CoP error: {result.max_cop_error_mm:.2f} mm")
     print(f"max swing force: {result.max_swing_force:.2f} N")
     print(f"max tangential force: {result.max_tangential_force:.2f} N")
     print(f"max friction ratio: {result.max_friction_ratio:.3f}")

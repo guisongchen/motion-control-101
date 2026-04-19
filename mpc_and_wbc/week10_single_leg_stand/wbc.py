@@ -157,7 +157,10 @@ class WholeBodyController:
               c_ddot_des: np.ndarray, L_dot_des: np.ndarray,
               f_ref: np.ndarray,
               v: np.ndarray,
-              tau_min: np.ndarray, tau_max: np.ndarray) -> Optional[dict]:
+              tau_min: np.ndarray, tau_max: np.ndarray,
+              force_task_matrix: Optional[np.ndarray] = None,
+              force_task_ref: Optional[np.ndarray] = None,
+              force_task_weight: Optional[np.ndarray] = None) -> Optional[dict]:
         """
         求解 WBC QP，返回关节力矩。
 
@@ -181,11 +184,39 @@ class WholeBodyController:
         W4_mat = W4 * np.eye(nv)
         P_vv = J_com.T @ W1 @ J_com + J_L.T @ W2 @ J_L + W4_mat
         W3_mat = self._force_weight_matrix()
-        P_ff = W3_mat
+        P_ff = W3_mat.copy()
         P = sparse.block_diag([P_vv, P_ff], format="csc")
 
         q_v = -(J_com.T @ W1 @ c_ddot_des + J_L.T @ W2 @ L_dot_des)
         q_f = -W3_mat @ f_ref
+        if force_task_matrix is not None:
+            if force_task_ref is None or force_task_weight is None:
+                raise ValueError(
+                    "force_task_ref and force_task_weight must be provided with force_task_matrix."
+                )
+            task_matrix = np.asarray(force_task_matrix, dtype=float)
+            task_ref = np.asarray(force_task_ref, dtype=float)
+            task_weight = np.asarray(force_task_weight, dtype=float)
+            if task_matrix.shape[1] != self.nf:
+                raise ValueError(
+                    f"Force task matrix must have {self.nf} columns, got {task_matrix.shape[1]}."
+                )
+            if task_matrix.shape[0] != task_ref.shape[0]:
+                raise ValueError(
+                    f"Force task reference length {task_ref.shape[0]} does not match task rows "
+                    f"{task_matrix.shape[0]}."
+                )
+            if task_weight.ndim == 1:
+                weight_matrix = np.diag(task_weight)
+            else:
+                weight_matrix = task_weight
+            if weight_matrix.shape != (task_matrix.shape[0], task_matrix.shape[0]):
+                raise ValueError(
+                    "Force task weight must be a vector or square matrix matching the task rows."
+                )
+            P_ff += task_matrix.T @ weight_matrix @ task_matrix
+            q_f += -(task_matrix.T @ weight_matrix @ task_ref)
+            P = sparse.block_diag([P_vv, P_ff], format="csc")
         q = np.concatenate([q_v, q_f])
 
         # -----------------------------------------------------------------

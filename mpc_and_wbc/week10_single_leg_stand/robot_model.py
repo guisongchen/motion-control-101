@@ -296,6 +296,7 @@ class RobotModel:
         normal_force = 0.0
         tangential_force = 0.0
         positions = []
+        weighted_position_sum = np.zeros(3)
         for contact_id in range(self.data.ncon):
             contact = self.data.contact[contact_id]
             body1 = int(self.model.geom_bodyid[int(contact.geom1)])
@@ -309,15 +310,23 @@ class RobotModel:
 
             wrench = np.zeros(6)
             mujoco.mj_contactForce(self.model, self.data, contact_id, wrench)
-            normal_force += max(0.0, float(wrench[0]))
+            contact_normal_force = max(0.0, float(wrench[0]))
+            normal_force += contact_normal_force
             tangential_force += float(np.linalg.norm(wrench[1:3]))
-            positions.append(np.array(contact.pos[:3], copy=True))
+            contact_position = np.array(contact.pos[:3], copy=True)
+            positions.append(contact_position)
+            weighted_position_sum += contact_normal_force * contact_position
             is_contact = True
 
         if positions:
             position = np.mean(positions, axis=0)
         else:
             position = self.get_link_com_position(link_index)
+
+        if normal_force > 1e-6:
+            cop_position = weighted_position_sum / normal_force
+        else:
+            cop_position = position.copy()
 
         friction_ratio = tangential_force / max(normal_force, 1e-6)
         return {
@@ -326,5 +335,6 @@ class RobotModel:
             "tangential_force": tangential_force,
             "friction_ratio": friction_ratio,
             "position": position,
+            "cop_position": cop_position,
             "contact_count": len(positions),
         }
