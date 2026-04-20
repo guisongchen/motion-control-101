@@ -6,7 +6,7 @@ import math
 import mujoco
 import numpy as np
 
-import config
+from direct_single_support_config import DIRECT_SINGLE_SUPPORT_CONFIG as cfg
 import wbc as wbc_module
 from main import compute_pd_torque, get_leg_joint_names
 from robot_model import RobotModel
@@ -48,28 +48,29 @@ def build_direct_pose(
     support_leg: str,
 ) -> np.ndarray:
     """Construct the tuned direct single-support pose in DOF order."""
+    pose_cfg = cfg.pose
     swing_leg = "left" if support_leg == "right" else "right"
     support_sign = 1.0 if support_leg == "right" else -1.0
-    pose = dict(config.STANDING_JOINT_ANGLES)
+    pose = dict(cfg.env.standing_joint_angles)
 
-    pose[f"{support_leg}_hip_pitch_joint"] = -0.28 - config.DIRECT_SINGLE_SUPPORT_SUPPORT_PITCH_DELTA
-    pose[f"{support_leg}_knee_joint"] = 0.62 + 0.4 * config.DIRECT_SINGLE_SUPPORT_SUPPORT_PITCH_DELTA
-    pose[f"{support_leg}_ankle_pitch_joint"] = -0.34 + 0.2 * config.DIRECT_SINGLE_SUPPORT_SUPPORT_PITCH_DELTA
+    pose[f"{support_leg}_hip_pitch_joint"] = -0.28 - pose_cfg.support_pitch_delta
+    pose[f"{support_leg}_knee_joint"] = 0.62 + 0.4 * pose_cfg.support_pitch_delta
+    pose[f"{support_leg}_ankle_pitch_joint"] = -0.34 + 0.2 * pose_cfg.support_pitch_delta
 
-    pose[f"{support_leg}_hip_roll_joint"] = support_sign * config.DIRECT_SINGLE_SUPPORT_SUPPORT_ROLL_DELTA
-    pose[f"{support_leg}_ankle_roll_joint"] = -support_sign * config.DIRECT_SINGLE_SUPPORT_SUPPORT_ROLL_DELTA
+    pose[f"{support_leg}_hip_roll_joint"] = support_sign * pose_cfg.support_roll_delta
+    pose[f"{support_leg}_ankle_roll_joint"] = -support_sign * pose_cfg.support_roll_delta
 
-    pose[f"{swing_leg}_hip_pitch_joint"] = config.DIRECT_SINGLE_SUPPORT_SWING_HIP_PITCH
-    pose[f"{swing_leg}_knee_joint"] = config.DIRECT_SINGLE_SUPPORT_SWING_KNEE
-    pose[f"{swing_leg}_ankle_pitch_joint"] = config.DIRECT_SINGLE_SUPPORT_SWING_ANKLE_PITCH
-    pose[f"{swing_leg}_hip_roll_joint"] = support_sign * config.DIRECT_SINGLE_SUPPORT_SWING_ROLL_DELTA
-    pose[f"{swing_leg}_ankle_roll_joint"] = -support_sign * config.DIRECT_SINGLE_SUPPORT_SWING_ROLL_DELTA
+    pose[f"{swing_leg}_hip_pitch_joint"] = pose_cfg.swing_hip_pitch
+    pose[f"{swing_leg}_knee_joint"] = pose_cfg.swing_knee
+    pose[f"{swing_leg}_ankle_pitch_joint"] = pose_cfg.swing_ankle_pitch
+    pose[f"{swing_leg}_hip_roll_joint"] = support_sign * pose_cfg.swing_roll_delta
+    pose[f"{swing_leg}_ankle_roll_joint"] = -support_sign * pose_cfg.swing_roll_delta
 
-    pose[f"{support_leg}_shoulder_pitch_joint"] = config.DIRECT_SINGLE_SUPPORT_SUPPORT_ARM_SHOULDER_PITCH
+    pose[f"{support_leg}_shoulder_pitch_joint"] = pose_cfg.support_arm_shoulder_pitch
     pose[f"{support_leg}_shoulder_roll_joint"] = (
-        support_sign * config.DIRECT_SINGLE_SUPPORT_SUPPORT_ARM_SHOULDER_ROLL
+        support_sign * pose_cfg.support_arm_shoulder_roll
     )
-    pose[f"{support_leg}_elbow_joint"] = support_sign * config.DIRECT_SINGLE_SUPPORT_SUPPORT_ARM_ELBOW
+    pose[f"{support_leg}_elbow_joint"] = support_sign * pose_cfg.support_arm_elbow
 
     q_target = np.zeros(len(joint_names))
     for idx, name in enumerate(joint_names):
@@ -83,7 +84,7 @@ def resolve_support_contact_local_positions(
     initial_support_contact: np.ndarray,
 ) -> list[np.ndarray | None]:
     """Pick the support-foot points whose accelerations WBC constrains to zero."""
-    mode = config.DIRECT_SINGLE_SUPPORT_WBC_CONTACT_POINT
+    mode = cfg.contact.wbc_contact_point
     if mode == "body_origin":
         return [None]
     if mode == "initial_contact":
@@ -124,10 +125,10 @@ def compute_corner_patch_force_reference(
     cop_local = foot_rotation.T @ (cop_world - foot_origin)
     x_coords = np.array([pos[0] for pos in corner_positions])
     y_coords = np.array([pos[1] for pos in corner_positions])
-    x_min = float(np.min(x_coords)) + config.DIRECT_SINGLE_SUPPORT_COP_MARGIN
-    x_max = float(np.max(x_coords)) - config.DIRECT_SINGLE_SUPPORT_COP_MARGIN
-    y_min = float(np.min(y_coords)) + config.DIRECT_SINGLE_SUPPORT_COP_MARGIN
-    y_max = float(np.max(y_coords)) - config.DIRECT_SINGLE_SUPPORT_COP_MARGIN
+    x_min = float(np.min(x_coords)) + cfg.contact.cop_margin
+    x_max = float(np.max(x_coords)) - cfg.contact.cop_margin
+    y_min = float(np.min(y_coords)) + cfg.contact.cop_margin
+    y_max = float(np.max(y_coords)) - cfg.contact.cop_margin
 
     target_x = float(np.clip(cop_local[0], x_min, x_max))
     target_y = float(np.clip(cop_local[1], y_min, y_max))
@@ -164,10 +165,10 @@ def clip_corner_patch_cop_target(
     cop_local = foot_rotation.T @ (cop_world - foot_origin)
     x_coords = np.array([pos[0] for pos in corner_positions])
     y_coords = np.array([pos[1] for pos in corner_positions])
-    x_min = float(np.min(x_coords)) + config.DIRECT_SINGLE_SUPPORT_COP_MARGIN
-    x_max = float(np.max(x_coords)) - config.DIRECT_SINGLE_SUPPORT_COP_MARGIN
-    y_min = float(np.min(y_coords)) + config.DIRECT_SINGLE_SUPPORT_COP_MARGIN
-    y_max = float(np.max(y_coords)) - config.DIRECT_SINGLE_SUPPORT_COP_MARGIN
+    x_min = float(np.min(x_coords)) + cfg.contact.cop_margin
+    x_max = float(np.max(x_coords)) - cfg.contact.cop_margin
+    y_min = float(np.min(y_coords)) + cfg.contact.cop_margin
+    y_max = float(np.max(y_coords)) - cfg.contact.cop_margin
 
     clipped_local = cop_local.copy()
     clipped_local[0] = np.clip(clipped_local[0], x_min, x_max)
@@ -203,14 +204,13 @@ def apply_measured_cop_feedback(
     measured_velocity_local = foot_rotation.T @ measured_cop_velocity_world
     local_correction = np.zeros(3, dtype=float)
     local_correction[:2] = (
-        config.DIRECT_SINGLE_SUPPORT_COP_FEEDBACK_KP
-        * (nominal_local[:2] - measured_local[:2])
-        - config.DIRECT_SINGLE_SUPPORT_COP_FEEDBACK_KD * measured_velocity_local[:2]
+        cfg.cop.kp * (nominal_local[:2] - measured_local[:2])
+        - cfg.cop.kd * measured_velocity_local[:2]
     )
     local_correction[:2] = np.clip(
         local_correction[:2],
-        -config.DIRECT_SINGLE_SUPPORT_COP_FEEDBACK_MAX_OFFSET,
-        config.DIRECT_SINGLE_SUPPORT_COP_FEEDBACK_MAX_OFFSET,
+        -cfg.cop.max_offset,
+        cfg.cop.max_offset,
     )
     corrected_local = nominal_local + local_correction
     corrected_world, corrected_local = clip_corner_patch_cop_target(
@@ -267,12 +267,12 @@ def build_corner_patch_wrench_task(
     )
     task_weight = np.diag(
         [
-            config.DIRECT_SINGLE_SUPPORT_WRENCH_FORCE_XY_WEIGHT,
-            config.DIRECT_SINGLE_SUPPORT_WRENCH_FORCE_XY_WEIGHT,
-            config.DIRECT_SINGLE_SUPPORT_WRENCH_FORCE_Z_WEIGHT,
-            config.DIRECT_SINGLE_SUPPORT_WRENCH_MOMENT_WEIGHT,
-            config.DIRECT_SINGLE_SUPPORT_WRENCH_MOMENT_WEIGHT,
-            config.DIRECT_SINGLE_SUPPORT_WRENCH_YAW_MOMENT_WEIGHT,
+            cfg.wrench.force_xy_weight,
+            cfg.wrench.force_xy_weight,
+            cfg.wrench.force_z_weight,
+            cfg.wrench.moment_weight,
+            cfg.wrench.moment_weight,
+            cfg.wrench.yaw_moment_weight,
         ]
     )
     return task_matrix, task_ref, task_weight
@@ -292,7 +292,7 @@ def resolve_support_cop_target_world(
     initial_support_contact: np.ndarray,
 ) -> np.ndarray:
     """Choose the world-frame CoP target used to bias the patch force reference."""
-    mode = config.DIRECT_SINGLE_SUPPORT_COP_TARGET
+    mode = cfg.contact.cop_target
     if mode == "initial_contact":
         return initial_support_contact
     if mode == "support_com_ref":
@@ -304,32 +304,40 @@ def resolve_support_cop_target_world(
 
 def run_direct_single_support() -> DirectSingleSupportResult:
     """Run the direct single-support WBC benchmark with tuned current-best settings."""
-    support_leg = "right" if config.DIRECT_SINGLE_SUPPORT_SUPPORT_FOOT_NAME.startswith("right") else "left"
+    env_cfg = cfg.env
+    pose_cfg = cfg.pose
+    control_cfg = cfg.control
+    contact_cfg = cfg.contact
+    cop_cfg = cfg.cop
+    wrench_cfg = cfg.wrench
+    success_cfg = cfg.success
+
+    support_leg = "right" if env_cfg.support_foot_name.startswith("right") else "left"
     swing_leg = "left" if support_leg == "right" else "right"
     support_sign = 1.0 if support_leg == "right" else -1.0
 
-    robot = RobotModel(config.MODEL_PATH)
-    robot.model.opt.gravity[:] = config.GRAVITY
-    robot.model.opt.timestep = config.DT_SIM
-    robot.model.dof_damping[:6] = config.BASE_DOF_DAMPING * config.DIRECT_SINGLE_SUPPORT_DAMPING_SCALE
-    robot.model.dof_damping[6:] = config.JOINT_DOF_DAMPING * config.DIRECT_SINGLE_SUPPORT_DAMPING_SCALE
+    robot = RobotModel(env_cfg.model_path)
+    robot.model.opt.gravity[:] = env_cfg.gravity
+    robot.model.opt.timestep = env_cfg.dt
+    robot.model.dof_damping[:6] = env_cfg.base_damping * pose_cfg.damping_scale
+    robot.model.dof_damping[6:] = env_cfg.joint_damping * pose_cfg.damping_scale
 
     base_pos = np.array(
         [
             0.0,
-            -support_sign * config.DIRECT_SINGLE_SUPPORT_BASE_LATERAL_SHIFT,
-            config.DIRECT_SINGLE_SUPPORT_BASE_HEIGHT,
+            -support_sign * pose_cfg.base_lateral_shift,
+            pose_cfg.base_height,
         ],
         dtype=float,
     )
-    base_orn = quat_from_roll(-support_sign * config.DIRECT_SINGLE_SUPPORT_BASE_ROLL)
+    base_orn = quat_from_roll(-support_sign * pose_cfg.base_roll)
     robot.reset_base_pose(base_pos, base_orn)
 
     q_target = build_direct_pose(robot.dof_joint_names, support_leg)
     robot.reset_joint_positions(q_target)
 
-    candidate_foot_links = [robot.link_name_to_index[name] for name in config.FOOT_LINK_NAMES]
-    support_link = robot.link_name_to_index[config.DIRECT_SINGLE_SUPPORT_SUPPORT_FOOT_NAME]
+    candidate_foot_links = [robot.link_name_to_index[name] for name in env_cfg.foot_link_names]
+    support_link = robot.link_name_to_index[env_cfg.support_foot_name]
     swing_link = next(link for link in candidate_foot_links if link != support_link)
     estimator = StateEstimator(robot, candidate_foot_links)
     original_gains = (
@@ -338,10 +346,10 @@ def run_direct_single_support() -> DirectSingleSupportResult:
         wbc_module.Kp_L,
         wbc_module.Kd_L,
     )
-    wbc_module.Kp_c = config.DIRECT_SINGLE_SUPPORT_COM_KP
-    wbc_module.Kd_c = config.DIRECT_SINGLE_SUPPORT_COM_KD
-    wbc_module.Kp_L = config.DIRECT_SINGLE_SUPPORT_MOMENTUM_KP
-    wbc_module.Kd_L = config.DIRECT_SINGLE_SUPPORT_MOMENTUM_KD
+    wbc_module.Kp_c = control_cfg.com_kp
+    wbc_module.Kd_c = control_cfg.com_kd
+    wbc_module.Kp_L = control_cfg.momentum_kp
+    wbc_module.Kd_L = control_cfg.momentum_kd
 
     initial_support_contact = robot.get_contact_metrics(support_link)["position"].copy()
     initial_support_body = robot.get_link_com_position(support_link).copy()
@@ -360,7 +368,7 @@ def run_direct_single_support() -> DirectSingleSupportResult:
 
     state0 = estimator.update(preferred_support_foot_link=support_link, lock_support=True)
     c_ref = state0["c"].copy()
-    support_total_normal_force = -config.GRAVITY[2] * robot.total_mass
+    support_total_normal_force = -env_cfg.gravity[2] * robot.total_mass
     initial_support_metrics = robot.get_contact_metrics(support_link)
     filtered_cop_world = np.array(initial_support_metrics["cop_position"], copy=True)
     prev_filtered_cop_world = filtered_cop_world.copy()
@@ -368,7 +376,7 @@ def run_direct_single_support() -> DirectSingleSupportResult:
     prev_filtered_support_position_world = filtered_support_position_world.copy()
     initial_support_yaw = yaw_from_rotation(np.array(robot.data.xmat[support_link]).reshape(3, 3))
 
-    total_steps = int(config.DIRECT_SINGLE_SUPPORT_DURATION / config.DT_SIM)
+    total_steps = int(control_cfg.duration / env_cfg.dt)
     wbc_failures = 0
     max_contact_slip = 0.0
     max_body_slip = 0.0
@@ -380,27 +388,27 @@ def run_direct_single_support() -> DirectSingleSupportResult:
     final_base_z = float(robot.data.qpos[2])
 
     print("\n===== 直接单足支撑 WBC 基准测试 =====")
-    print(f"support foot: {config.DIRECT_SINGLE_SUPPORT_SUPPORT_FOOT_NAME}")
-    print(f"duration: {config.DIRECT_SINGLE_SUPPORT_DURATION:.1f} s")
-    print(f"damping scale: {config.DIRECT_SINGLE_SUPPORT_DAMPING_SCALE:.2f}")
-    print(f"support blend: {config.DIRECT_SINGLE_SUPPORT_SUPPORT_BLEND:.3f}")
-    print(f"contact point: {config.DIRECT_SINGLE_SUPPORT_WBC_CONTACT_POINT}")
-    print(f"CoP target: {config.DIRECT_SINGLE_SUPPORT_COP_TARGET}")
-    print(f"CoP feedback: {config.DIRECT_SINGLE_SUPPORT_COP_FEEDBACK_ENABLED}")
-    if config.DIRECT_SINGLE_SUPPORT_COP_FEEDBACK_ENABLED:
+    print(f"support foot: {env_cfg.support_foot_name}")
+    print(f"duration: {control_cfg.duration:.1f} s")
+    print(f"damping scale: {pose_cfg.damping_scale:.2f}")
+    print(f"support blend: {control_cfg.support_blend:.3f}")
+    print(f"contact point: {contact_cfg.wbc_contact_point}")
+    print(f"CoP target: {contact_cfg.cop_target}")
+    print(f"CoP feedback: {cop_cfg.enabled}")
+    if cop_cfg.enabled:
         print(
             "CoP feedback gains: "
-            f"alpha={config.DIRECT_SINGLE_SUPPORT_COP_FEEDBACK_FILTER_ALPHA:.3f}, "
-            f"kp={config.DIRECT_SINGLE_SUPPORT_COP_FEEDBACK_KP:.3f}, "
-            f"kd={config.DIRECT_SINGLE_SUPPORT_COP_FEEDBACK_KD:.3f}, "
-            f"max_offset={1000.0 * config.DIRECT_SINGLE_SUPPORT_COP_FEEDBACK_MAX_OFFSET:.1f}mm"
+            f"alpha={cop_cfg.filter_alpha:.3f}, "
+            f"kp={cop_cfg.kp:.3f}, "
+            f"kd={cop_cfg.kd:.3f}, "
+            f"max_offset={1000.0 * cop_cfg.max_offset:.1f}mm"
         )
-    print(f"wrench objective: {config.DIRECT_SINGLE_SUPPORT_USE_WRENCH_OBJECTIVE}")
+    print(f"wrench objective: {control_cfg.use_wrench_objective}")
     print(
         "wrench regulation: "
-        f"force_xy_w={config.DIRECT_SINGLE_SUPPORT_WRENCH_FORCE_XY_WEIGHT:.3f}, "
-        f"moment_w={config.DIRECT_SINGLE_SUPPORT_WRENCH_MOMENT_WEIGHT:.3f}, "
-        f"yaw_w={config.DIRECT_SINGLE_SUPPORT_WRENCH_YAW_MOMENT_WEIGHT:.3f}"
+        f"force_xy_w={wrench_cfg.force_xy_weight:.3f}, "
+        f"moment_w={wrench_cfg.moment_weight:.3f}, "
+        f"yaw_w={wrench_cfg.yaw_moment_weight:.3f}"
     )
     print("=" * 50)
 
@@ -415,8 +423,8 @@ def run_direct_single_support() -> DirectSingleSupportResult:
                 q_target,
                 q[7:],
                 v[6:],
-                config.DIRECT_SINGLE_SUPPORT_POSTURE_KP,
-                config.DIRECT_SINGLE_SUPPORT_POSTURE_KD,
+                control_cfg.posture_kp,
+                control_cfg.posture_kd,
                 robot.tau_limits,
             )
 
@@ -452,23 +460,21 @@ def run_direct_single_support() -> DirectSingleSupportResult:
             if support_metrics_pre["normal_force"] > 1e-6:
                 measured_cop_world = np.array(support_metrics_pre["cop_position"], copy=True)
                 filtered_cop_world = (
-                    config.DIRECT_SINGLE_SUPPORT_COP_FEEDBACK_FILTER_ALPHA * measured_cop_world
-                    + (1.0 - config.DIRECT_SINGLE_SUPPORT_COP_FEEDBACK_FILTER_ALPHA) * filtered_cop_world
+                    cop_cfg.filter_alpha * measured_cop_world
+                    + (1.0 - cop_cfg.filter_alpha) * filtered_cop_world
                 )
                 measured_support_position_world = np.array(support_metrics_pre["position"], copy=True)
                 filtered_support_position_world = (
-                    config.DIRECT_SINGLE_SUPPORT_WRENCH_STATE_FILTER_ALPHA
-                    * measured_support_position_world
-                    + (1.0 - config.DIRECT_SINGLE_SUPPORT_WRENCH_STATE_FILTER_ALPHA)
-                    * filtered_support_position_world
+                    wrench_cfg.state_filter_alpha * measured_support_position_world
+                    + (1.0 - wrench_cfg.state_filter_alpha) * filtered_support_position_world
                 )
             measured_cop_velocity_world = (
                 filtered_cop_world - prev_filtered_cop_world
-            ) / config.DT_SIM
+            ) / env_cfg.dt
             prev_filtered_cop_world = filtered_cop_world.copy()
             measured_support_slip_velocity_world = (
                 filtered_support_position_world - prev_filtered_support_position_world
-            ) / config.DT_SIM
+            ) / env_cfg.dt
             prev_filtered_support_position_world = filtered_support_position_world.copy()
             nominal_cop_target_world = resolve_support_cop_target_world(
                 state,
@@ -476,7 +482,7 @@ def run_direct_single_support() -> DirectSingleSupportResult:
                 initial_support_contact,
             )
             cop_target_world = nominal_cop_target_world
-            if config.DIRECT_SINGLE_SUPPORT_COP_FEEDBACK_ENABLED:
+            if cop_cfg.enabled:
                 cop_target_world, _ = apply_measured_cop_feedback(
                     support_contact_local_positions,
                     foot_origin,
@@ -487,29 +493,28 @@ def run_direct_single_support() -> DirectSingleSupportResult:
                 )
             support_slip_world = filtered_support_position_world - initial_support_contact
             desired_force_xy_world = -(
-                config.DIRECT_SINGLE_SUPPORT_WRENCH_SLIP_FORCE_KP * support_slip_world[:2]
-                + config.DIRECT_SINGLE_SUPPORT_WRENCH_SLIP_FORCE_KD
-                * measured_support_slip_velocity_world[:2]
+                wrench_cfg.slip_force_kp * support_slip_world[:2]
+                + wrench_cfg.slip_force_kd * measured_support_slip_velocity_world[:2]
             )
             desired_force_xy_world = np.clip(
                 desired_force_xy_world,
-                -config.DIRECT_SINGLE_SUPPORT_WRENCH_SLIP_FORCE_MAX,
-                config.DIRECT_SINGLE_SUPPORT_WRENCH_SLIP_FORCE_MAX,
+                -wrench_cfg.slip_force_max,
+                wrench_cfg.slip_force_max,
             )
             _, support_ang_vel = robot.get_link_velocity(support_link)
             support_yaw_error = wrap_to_pi(yaw_from_rotation(foot_rotation) - initial_support_yaw)
             desired_yaw_moment = -(
-                config.DIRECT_SINGLE_SUPPORT_WRENCH_YAW_MOMENT_KP * support_yaw_error
-                + config.DIRECT_SINGLE_SUPPORT_WRENCH_YAW_MOMENT_KD * support_ang_vel[2]
+                wrench_cfg.yaw_moment_kp * support_yaw_error
+                + wrench_cfg.yaw_moment_kd * support_ang_vel[2]
             )
             desired_yaw_moment = float(
                 np.clip(
                     desired_yaw_moment,
-                    -config.DIRECT_SINGLE_SUPPORT_WRENCH_YAW_MOMENT_MAX,
-                    config.DIRECT_SINGLE_SUPPORT_WRENCH_YAW_MOMENT_MAX,
+                    -wrench_cfg.yaw_moment_max,
+                    wrench_cfg.yaw_moment_max,
                 )
             )
-            if config.DIRECT_SINGLE_SUPPORT_USE_WRENCH_OBJECTIVE:
+            if control_cfg.use_wrench_objective:
                 force_task_matrix, force_task_ref, force_task_weight = build_corner_patch_wrench_task(
                     support_contact_local_positions,
                     foot_origin,
@@ -559,8 +564,8 @@ def run_direct_single_support() -> DirectSingleSupportResult:
                 support_mask = np.ones(robot.num_joints, dtype=bool)
                 support_mask[swing_leg_dof_indices] = False
                 tau_cmd[support_mask] = (
-                    (1.0 - config.DIRECT_SINGLE_SUPPORT_SUPPORT_BLEND) * safe_tau[support_mask]
-                    + config.DIRECT_SINGLE_SUPPORT_SUPPORT_BLEND
+                    (1.0 - control_cfg.support_blend) * safe_tau[support_mask]
+                    + control_cfg.support_blend
                     * np.clip(
                         wbc_result["tau"][support_mask],
                         -robot.tau_limits[support_mask],
@@ -590,7 +595,7 @@ def run_direct_single_support() -> DirectSingleSupportResult:
             max_friction_ratio = max(max_friction_ratio, float(support_metrics["friction_ratio"]))
             max_tangential_force = max(max_tangential_force, float(support_metrics["tangential_force"]))
 
-            final_t = (step + 1) * config.DT_SIM
+            final_t = (step + 1) * env_cfg.dt
             final_base_z = float(robot.data.qpos[2])
 
             if (step + 1) % 240 == 0:
@@ -614,10 +619,10 @@ def run_direct_single_support() -> DirectSingleSupportResult:
         ) = original_gains
 
     success = (
-        final_t >= config.DIRECT_SINGLE_SUPPORT_DURATION
-        and max_contact_slip <= config.DIRECT_SINGLE_SUPPORT_MAX_CONTACT_SLIP
-        and max_swing_force <= config.DIRECT_SINGLE_SUPPORT_MAX_SWING_FORCE
-        and max_friction_ratio <= config.DIRECT_SINGLE_SUPPORT_MAX_FRICTION_RATIO
+        final_t >= control_cfg.duration
+        and max_contact_slip <= success_cfg.max_contact_slip
+        and max_swing_force <= success_cfg.max_swing_force
+        and max_friction_ratio <= success_cfg.max_friction_ratio
     )
     return DirectSingleSupportResult(
         survived_s=final_t,
