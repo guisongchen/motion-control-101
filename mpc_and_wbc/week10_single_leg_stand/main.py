@@ -950,7 +950,7 @@ def main():
             J_c = robot.get_foot_jacobian(support_foot_link, q)
             J_com = robot.get_com_jacobian(q)
             J_L = robot.get_angular_momentum_jacobian(q)
-            Jc_dot = np.zeros((6, robot.nv))
+            Jc_dot = np.zeros_like(J_c)
 
             c_ddot_des = wbc.compute_desired_acceleration(
                 c_ref, c, c_dot_ref, c_dot, c_ddot_ref

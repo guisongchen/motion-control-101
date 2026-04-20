@@ -85,8 +85,8 @@ class WholeBodyController:
         # 因为 OSQP update(Ax=...) 不允许超过 setup 时的 nnz 数量。
         A_dok = sparse.dok_matrix((n_constr, nz))
 
-        # 1) 无滑动约束占位 (行 0:3, 列 0:nv)
-        for i in range(3):
+        # 1) 无滑动约束占位 (行 0:n_slip, 列 0:nv)
+        for i in range(n_slip):
             for j in range(nv):
                 A_dok[i, j] = 1.0
 
@@ -177,6 +177,7 @@ class WholeBodyController:
         n_fcon = 4 * self.num_contacts
 
         J_c_lin = self._linear_contact_jacobian(J_c)
+        Jc_dot_lin = self._linear_contact_jacobian(Jc_dot)
 
         # -----------------------------------------------------------------
         # 1. 更新 P, q
@@ -224,8 +225,8 @@ class WholeBodyController:
         # -----------------------------------------------------------------
         A_dok = self._A.todok()
 
-        # 无滑动: J_c_lin v_dot = 0
-        for i in range(3):
+        # 无滑动: J_c_lin v_dot + Jc_dot_lin v = 0
+        for i in range(n_slip):
             for j in range(nv):
                 A_dok[i, j] = J_c_lin[i, j]
 
@@ -248,15 +249,14 @@ class WholeBodyController:
         l = self._l.copy()
         u = self._u.copy()
 
-        # 无滑动等式: l = u = 0
-        l[:n_slip] = 0.0
-        u[:n_slip] = 0.0
+        # 无滑动等式: J_c_lin v_dot = -Jc_dot_lin v
+        slip_bias = -(Jc_dot_lin @ v)
+        l[:n_slip] = slip_bias
+        u[:n_slip] = slip_bias
 
         # 力矩限幅
         SC = C[6:]
-        tau_ext = (JcT @ f_ref)[6:]  # 近似：用后验项中的 JcT f 的关节部分
-        # 实际上约束是 M v_dot + C - J_c^T f，所以边界是 tau_min - C + J_c^T f 中的已知部分
-        # 但在 OSQP 的 l <= A z <= u 形式中：
+        # 在 OSQP 的 l <= A z <= u 形式中：
         # A_tau z = M[6:,:] v_dot - J_c^T[6:,:] f
         # 要求 tau_min <= M v_dot + C - J_c^T f <= tau_max
         # 即 tau_min - C <= M v_dot - J_c^T f <= tau_max - C

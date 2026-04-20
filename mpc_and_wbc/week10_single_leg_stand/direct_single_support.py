@@ -538,7 +538,7 @@ def run_direct_single_support() -> DirectSingleSupportResult:
                 M,
                 C,
                 J_c,
-                np.zeros((6, robot.nv)),
+                np.zeros_like(J_c),
                 J_com,
                 J_L,
                 c_ddot_des,
