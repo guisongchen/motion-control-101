@@ -46,9 +46,11 @@ def yaw_from_rotation(rotation: np.ndarray) -> float:
 def build_direct_pose(
     joint_names: list[str],
     support_leg: str,
+    pose_cfg=None,
 ) -> np.ndarray:
     """Construct the tuned direct single-support pose in DOF order."""
-    pose_cfg = cfg.pose
+    if pose_cfg is None:
+        pose_cfg = cfg.pose
     swing_leg = "left" if support_leg == "right" else "right"
     support_sign = 1.0 if support_leg == "right" else -1.0
     pose = dict(cfg.env.standing_joint_angles)
@@ -302,8 +304,16 @@ def resolve_support_cop_target_world(
     raise ValueError(f"Unsupported direct single-support CoP target mode: {mode}")
 
 
-def run_direct_single_support() -> DirectSingleSupportResult:
-    """Run the direct single-support WBC benchmark with tuned current-best settings."""
+def run_direct_single_support(
+    pose_override: dict | None = None,
+    quiet: bool = False,
+    duration_override: float | None = None,
+) -> DirectSingleSupportResult:
+    """Run the direct single-support WBC benchmark with tuned current-best settings.""
+
+    The ``duration_override`` argument is useful for fast inner-loop optimization
+    where only the first second of behaviour matters.
+    """
     env_cfg = cfg.env
     pose_cfg = cfg.pose
     control_cfg = cfg.control
@@ -322,19 +332,26 @@ def run_direct_single_support() -> DirectSingleSupportResult:
     robot.model.dof_damping[:6] = env_cfg.base_damping * pose_cfg.damping_scale
     robot.model.dof_damping[6:] = env_cfg.joint_damping * pose_cfg.damping_scale
 
-    base_pos = np.array(
-        [
-            0.0,
-            -support_sign * pose_cfg.base_lateral_shift,
-            pose_cfg.base_height,
-        ],
-        dtype=float,
-    )
-    base_orn = quat_from_roll(-support_sign * pose_cfg.base_roll)
-    robot.reset_base_pose(base_pos, base_orn)
+    if pose_override is not None:
+        base_pos = np.asarray(pose_override["base_position"], dtype=float)
+        base_orn = np.asarray(pose_override["base_orientation"], dtype=float)
+        robot.reset_base_pose(base_pos, base_orn)
+        q_target = np.asarray(pose_override["joint_angles"], dtype=float)
+        robot.reset_joint_positions(q_target)
+    else:
+        base_pos = np.array(
+            [
+                0.0,
+                -support_sign * pose_cfg.base_lateral_shift,
+                pose_cfg.base_height,
+            ],
+            dtype=float,
+        )
+        base_orn = quat_from_roll(-support_sign * pose_cfg.base_roll)
+        robot.reset_base_pose(base_pos, base_orn)
 
-    q_target = build_direct_pose(robot.dof_joint_names, support_leg)
-    robot.reset_joint_positions(q_target)
+        q_target = build_direct_pose(robot.dof_joint_names, support_leg)
+        robot.reset_joint_positions(q_target)
 
     candidate_foot_links = [robot.link_name_to_index[name] for name in env_cfg.foot_link_names]
     support_link = robot.link_name_to_index[env_cfg.support_foot_name]
@@ -376,7 +393,8 @@ def run_direct_single_support() -> DirectSingleSupportResult:
     prev_filtered_support_position_world = filtered_support_position_world.copy()
     initial_support_yaw = yaw_from_rotation(np.array(robot.data.xmat[support_link]).reshape(3, 3))
 
-    total_steps = int(control_cfg.duration / env_cfg.dt)
+    duration = duration_override if duration_override is not None else control_cfg.duration
+    total_steps = int(duration / env_cfg.dt)
     wbc_failures = 0
     max_contact_slip = 0.0
     max_body_slip = 0.0
@@ -387,30 +405,31 @@ def run_direct_single_support() -> DirectSingleSupportResult:
     final_t = 0.0
     final_base_z = float(robot.data.qpos[2])
 
-    print("\n===== 直接单足支撑 WBC 基准测试 =====")
-    print(f"support foot: {env_cfg.support_foot_name}")
-    print(f"duration: {control_cfg.duration:.1f} s")
-    print(f"damping scale: {pose_cfg.damping_scale:.2f}")
-    print(f"support blend: {control_cfg.support_blend:.3f}")
-    print(f"contact point: {contact_cfg.wbc_contact_point}")
-    print(f"CoP target: {contact_cfg.cop_target}")
-    print(f"CoP feedback: {cop_cfg.enabled}")
-    if cop_cfg.enabled:
+    if not quiet:
+        print("\n===== 直接单足支撑 WBC 基准测试 =====")
+        print(f"support foot: {env_cfg.support_foot_name}")
+        print(f"duration: {control_cfg.duration:.1f} s")
+        print(f"damping scale: {pose_cfg.damping_scale:.2f}")
+        print(f"support blend: {control_cfg.support_blend:.3f}")
+        print(f"contact point: {contact_cfg.wbc_contact_point}")
+        print(f"CoP target: {contact_cfg.cop_target}")
+        print(f"CoP feedback: {cop_cfg.enabled}")
+        if cop_cfg.enabled:
+            print(
+                "CoP feedback gains: "
+                f"alpha={cop_cfg.filter_alpha:.3f}, "
+                f"kp={cop_cfg.kp:.3f}, "
+                f"kd={cop_cfg.kd:.3f}, "
+                f"max_offset={1000.0 * cop_cfg.max_offset:.1f}mm"
+            )
+        print(f"wrench objective: {control_cfg.use_wrench_objective}")
         print(
-            "CoP feedback gains: "
-            f"alpha={cop_cfg.filter_alpha:.3f}, "
-            f"kp={cop_cfg.kp:.3f}, "
-            f"kd={cop_cfg.kd:.3f}, "
-            f"max_offset={1000.0 * cop_cfg.max_offset:.1f}mm"
+            "wrench regulation: "
+            f"force_xy_w={wrench_cfg.force_xy_weight:.3f}, "
+            f"moment_w={wrench_cfg.moment_weight:.3f}, "
+            f"yaw_w={wrench_cfg.yaw_moment_weight:.3f}"
         )
-    print(f"wrench objective: {control_cfg.use_wrench_objective}")
-    print(
-        "wrench regulation: "
-        f"force_xy_w={wrench_cfg.force_xy_weight:.3f}, "
-        f"moment_w={wrench_cfg.moment_weight:.3f}, "
-        f"yaw_w={wrench_cfg.yaw_moment_weight:.3f}"
-    )
-    print("=" * 50)
+        print("=" * 50)
 
     try:
         for step in range(total_steps):
@@ -598,7 +617,7 @@ def run_direct_single_support() -> DirectSingleSupportResult:
             final_t = (step + 1) * env_cfg.dt
             final_base_z = float(robot.data.qpos[2])
 
-            if (step + 1) % 240 == 0:
+            if not quiet and (step + 1) % 240 == 0:
                 print(
                     f"t={final_t:.3f}s  "
                     f"base_z={final_base_z:.3f}  "
@@ -619,7 +638,7 @@ def run_direct_single_support() -> DirectSingleSupportResult:
         ) = original_gains
 
     success = (
-        final_t >= control_cfg.duration
+        final_t >= duration - 1e-6
         and max_contact_slip <= success_cfg.max_contact_slip
         and max_swing_force <= success_cfg.max_swing_force
         and max_friction_ratio <= success_cfg.max_friction_ratio
