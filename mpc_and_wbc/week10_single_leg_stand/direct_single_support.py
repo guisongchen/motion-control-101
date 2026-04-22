@@ -3,8 +3,10 @@
 from dataclasses import dataclass
 import math
 
+import json
 import mujoco
 import numpy as np
+from pathlib import Path
 
 from direct_single_support_config import DIRECT_SINGLE_SUPPORT_CONFIG as cfg
 import wbc as wbc_module
@@ -288,6 +290,18 @@ def compute_corner_patch_wrench_force_reference(
     return np.linalg.pinv(task_matrix) @ task_ref
 
 
+def _load_optimized_pose() -> dict:
+    """Load the simulation-optimized initial pose from results JSON."""
+    result_path = Path(__file__).parent / "results" / "optimized_pose_simulation_3s.json"
+    with result_path.open("r") as f:
+        data = json.load(f)
+    return {
+        "base_position": np.array(data["base_position"], dtype=float),
+        "base_orientation": np.array(data["base_orientation"], dtype=float),
+        "joint_angles": np.array(data["joint_angles"], dtype=float),
+    }
+
+
 def resolve_support_cop_target_world(
     state: dict,
     c_ref: np.ndarray,
@@ -332,26 +346,13 @@ def run_direct_single_support(
     robot.model.dof_damping[:6] = env_cfg.base_damping * pose_cfg.damping_scale
     robot.model.dof_damping[6:] = env_cfg.joint_damping * pose_cfg.damping_scale
 
-    if pose_override is not None:
-        base_pos = np.asarray(pose_override["base_position"], dtype=float)
-        base_orn = np.asarray(pose_override["base_orientation"], dtype=float)
-        robot.reset_base_pose(base_pos, base_orn)
-        q_target = np.asarray(pose_override["joint_angles"], dtype=float)
-        robot.reset_joint_positions(q_target)
-    else:
-        base_pos = np.array(
-            [
-                0.0,
-                -support_sign * pose_cfg.base_lateral_shift,
-                pose_cfg.base_height,
-            ],
-            dtype=float,
-        )
-        base_orn = quat_from_roll(-support_sign * pose_cfg.base_roll)
-        robot.reset_base_pose(base_pos, base_orn)
-
-        q_target = build_direct_pose(robot.dof_joint_names, support_leg)
-        robot.reset_joint_positions(q_target)
+    if pose_override is None:
+        pose_override = _load_optimized_pose()
+    base_pos = np.asarray(pose_override["base_position"], dtype=float)
+    base_orn = np.asarray(pose_override["base_orientation"], dtype=float)
+    robot.reset_base_pose(base_pos, base_orn)
+    q_target = np.asarray(pose_override["joint_angles"], dtype=float)
+    robot.reset_joint_positions(q_target)
 
     candidate_foot_links = [robot.link_name_to_index[name] for name in env_cfg.foot_link_names]
     support_link = robot.link_name_to_index[env_cfg.support_foot_name]
