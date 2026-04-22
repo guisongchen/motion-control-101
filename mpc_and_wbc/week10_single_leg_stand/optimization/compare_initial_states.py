@@ -3,6 +3,10 @@
 import json
 from pathlib import Path
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from direct_single_support import run_direct_single_support, DirectSingleSupportResult
 
 
@@ -15,7 +19,7 @@ def print_result(label: str, r: DirectSingleSupportResult) -> None:
 
 
 def main() -> None:
-    pose_path = Path(__file__).parent / "optimized_pose.json"
+    pose_path = Path(__file__).parent.parent / "results" / "optimized_pose.json"
     if not pose_path.exists():
         print(f"Optimized pose not found at {pose_path}")
         print("Please run optimize_static_pose.py first.")

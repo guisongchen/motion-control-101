@@ -3,6 +3,10 @@
 import json
 from pathlib import Path
 
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from direct_single_support import run_direct_single_support, DirectSingleSupportResult
 
 
@@ -24,7 +28,7 @@ def main() -> None:
     print("\n" + "=" * 70)
     print("2. STATIC OPTIMIZED (gravity torque + CoM alignment + constraints)")
     print("=" * 70)
-    static_path = Path(__file__).parent / "optimized_pose.json"
+    static_path = Path(__file__).parent.parent / "results" / "optimized_pose.json"
     static_pose = None
     if static_path.exists():
         with open(static_path) as f:
@@ -37,7 +41,7 @@ def main() -> None:
     print("\n" + "=" * 70)
     print("3. SIMULATION OPTIMIZED (Nelder-Mead on 1.0s WBC, verified 3.0s)")
     print("=" * 70)
-    sim_path = Path(__file__).parent / "optimized_pose_simulation.json"
+    sim_path = Path(__file__).parent.parent / "results" / "optimized_pose_simulation.json"
     sim_pose = None
     if sim_path.exists():
         with open(sim_path) as f:

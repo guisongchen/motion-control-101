@@ -14,6 +14,9 @@ from pathlib import Path
 import numpy as np
 from scipy.optimize import minimize
 
+import sys
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from direct_single_support import run_direct_single_support
 from direct_single_support_config import DIRECT_SINGLE_SUPPORT_CONFIG as cfg
 from robot_model import RobotModel
@@ -327,7 +330,7 @@ def optimize_pose_via_simulation(
 def main() -> None:
     pose_override = optimize_pose_via_simulation(maxiter=100, opt_duration=3.0)
 
-    output_path = Path(__file__).parent / "optimized_pose_simulation_3s.json"
+    output_path = Path(__file__).parent.parent / "results" / "optimized_pose_simulation_3s.json"
     with open(output_path, "w") as f:
         json.dump(pose_override, f, indent=2)
 

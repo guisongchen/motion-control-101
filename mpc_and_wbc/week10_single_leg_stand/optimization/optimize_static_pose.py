@@ -7,6 +7,9 @@ from pathlib import Path
 import numpy as np
 from scipy.optimize import minimize
 
+import sys
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from direct_single_support_config import DIRECT_SINGLE_SUPPORT_CONFIG as cfg
 from direct_single_support import build_direct_pose, quat_from_roll
 from robot_model import RobotModel
@@ -377,7 +380,7 @@ def main() -> None:
     optimizer = StaticPoseOptimizer(robot, env_cfg.support_foot_name, weights)
     pose_override = optimizer.optimize(maxiter=500)
 
-    output_path = Path(__file__).parent / "optimized_pose.json"
+    output_path = Path(__file__).parent.parent / "results" / "optimized_pose.json"
     with open(output_path, "w") as f:
         json.dump(pose_override, f, indent=2)
 
