@@ -32,7 +32,6 @@ from config import (
     SINGLE_SUPPORT_ESTABLISH_SWING_FORCE_MAX, SINGLE_SUPPORT_ESTABLISH_COM_SPEED,
     SINGLE_SUPPORT_POSE_BLEND_TIME,
     SINGLE_SUPPORT_FORCE_BLEND_TIME, SINGLE_SUPPORT_MIN_FORCE_RATIO, SINGLE_SUPPORT_HOLD_FORCE,
-    SINGLE_SUPPORT_PRE_ESTABLISH_TAU_BLEND,
     SINGLE_SUPPORT_MAX_TAU_BLEND, SINGLE_SUPPORT_MAX_HORIZONTAL_FORCE,
     SINGLE_SUPPORT_SUPPORT_HIP_PITCH_DELTA, SINGLE_SUPPORT_FORWARD_ERROR_CLIP,
     SINGLE_SUPPORT_SWING_HIP_PITCH_TARGET, SINGLE_SUPPORT_SWING_KNEE_TARGET,
@@ -40,6 +39,7 @@ from config import (
     LOAD_SHIFT_SUPPORT_RATIO, PRE_LIFTOFF_SUPPORT_RATIO, SINGLE_SUPPORT_SUPPORT_RATIO,
     LOAD_SHIFT_COM_RATIO, PRE_LIFTOFF_COM_RATIO, SINGLE_SUPPORT_COM_RATIO,
     PRE_LIFTOFF_SWING_FORCE_MAX, SINGLE_SUPPORT_SWING_FORCE_TARGET, COM_VEL_READY_THRESH,
+    PRE_LIFTOFF_FORWARD_ERROR_THRESH, PRE_LIFTOFF_FORWARD_VEL_THRESH,
     LOAD_SHIFT_READY_TIME, PRE_LIFTOFF_READY_TIME,
 )
 from robot_model import RobotModel
@@ -255,6 +255,28 @@ def compute_single_support_unload(
     ) * slip_guard
 
 
+def world_point_to_local_body_point(
+    robot: RobotModel,
+    link: int,
+    world_point: np.ndarray,
+) -> np.ndarray:
+    """Express a world-frame contact point in the queried body frame."""
+    foot_origin = np.array(robot.data.xpos[link], copy=True)
+    foot_rotation = np.array(robot.data.xmat[link]).reshape(3, 3)
+    return foot_rotation.T @ (np.asarray(world_point, dtype=float) - foot_origin)
+
+
+def should_model_swing_contact(
+    phase_state: PhaseState,
+    load_shift_metrics: LoadShiftMetrics,
+) -> bool:
+    """Keep the swing foot in the WBC model while it still carries meaningful load."""
+    return (
+        phase_state.phase == ControlPhase.SINGLE_SUPPORT
+        and load_shift_metrics.swing_force > SINGLE_SUPPORT_HOLD_FORCE
+    )
+
+
 def compute_swing_unload_factor(
     phase_state: PhaseState,
     t: float,
@@ -444,6 +466,35 @@ def compute_phase_com_target(
     return c_ref
 
 
+def compute_forward_handoff_metrics(
+    c: np.ndarray,
+    c_dot: np.ndarray,
+    c_ref: np.ndarray,
+) -> tuple[float, float]:
+    """Return forward CoM position error and x velocity for handoff gating."""
+    return float(c[0] - c_ref[0]), float(c_dot[0])
+
+
+def blend_joint_targets_toward_pose(
+    targets: np.ndarray,
+    joint_name_to_dof_idx: dict[str, int],
+    optimized_joint_angles: np.ndarray | None,
+    joint_names: list[str],
+    blend: float,
+) -> None:
+    """Blend a selected set of joints toward the optimized single-support pose."""
+    if optimized_joint_angles is None or blend <= 0.0:
+        return
+    for joint_name in joint_names:
+        if joint_name not in joint_name_to_dof_idx:
+            continue
+        joint_idx = joint_name_to_dof_idx[joint_name]
+        targets[joint_idx] = (
+            (1.0 - blend) * targets[joint_idx]
+            + blend * optimized_joint_angles[joint_idx]
+        )
+
+
 def build_safe_targets(
     initial_dof_angles: np.ndarray,
     joint_name_to_dof_idx: dict[str, int],
@@ -452,6 +503,7 @@ def build_safe_targets(
     swing_leg: str,
     support_leg: str,
     c: np.ndarray,
+    c_dot: np.ndarray,
     c_ref: np.ndarray,
     load_shift_metrics: LoadShiftMetrics,
     optimized_joint_angles: np.ndarray | None = None,
@@ -469,6 +521,21 @@ def build_safe_targets(
     hip_name = f"{swing_leg}_hip_pitch_joint"
     knee_name = f"{swing_leg}_knee_joint"
     ankle_pitch_name = f"{swing_leg}_ankle_pitch_joint"
+    preliftoff_pose_joint_names = [
+        f"{support_leg}_hip_pitch_joint",
+        f"{support_leg}_knee_joint",
+        f"{support_leg}_ankle_pitch_joint",
+        f"{support_leg}_hip_roll_joint",
+        f"{support_leg}_ankle_roll_joint",
+        f"{swing_leg}_hip_pitch_joint",
+        f"{swing_leg}_knee_joint",
+        f"{swing_leg}_ankle_pitch_joint",
+        f"{swing_leg}_hip_roll_joint",
+        f"{swing_leg}_ankle_roll_joint",
+        f"{support_leg}_shoulder_pitch_joint",
+        f"{support_leg}_shoulder_roll_joint",
+        f"{support_leg}_elbow_joint",
+    ]
 
     if load_shift_progress > 0.0:
         if phase_state.phase == ControlPhase.LOAD_SHIFT:
@@ -509,9 +576,27 @@ def build_safe_targets(
         roll_delta *= slip_scale
         apply_roll_shift_offset(targets, joint_name_to_dof_idx, support_leg, roll_delta)
         if phase_state.phase == ControlPhase.PRE_LIFTOFF:
-            pre_clip = 0.06
-            forward_error = np.clip(c[0] - c_ref[0], -pre_clip, pre_clip)
-            pitch_delta = -0.15 * (forward_error / max(pre_clip, 1e-6))
+            time_progress = min(
+                1.0,
+                phase_elapsed(phase_state, t) / max(PRE_LIFTOFF_TIME, 1e-6),
+            )
+            pose_blend = 0.75 * time_progress * slip_scale
+            blend_joint_targets_toward_pose(
+                targets,
+                joint_name_to_dof_idx,
+                optimized_joint_angles,
+                preliftoff_pose_joint_names,
+                pose_blend,
+            )
+            pos_clip = 0.08
+            vel_clip = 0.20
+            forward_error = np.clip(c[0] - c_ref[0], -pos_clip, pos_clip)
+            forward_velocity = np.clip(c_dot[0], -vel_clip, vel_clip)
+            pitch_delta = (
+                -0.10 * (forward_error / max(pos_clip, 1e-6))
+                -0.06 * (forward_velocity / max(vel_clip, 1e-6))
+            )
+            pitch_delta = float(np.clip(pitch_delta, -0.12, 0.12))
             apply_pitch_balance_offset(targets, joint_name_to_dof_idx, support_leg, pitch_delta)
         elif phase_state.phase == ControlPhase.SINGLE_SUPPORT:
             forward_error = np.clip(
@@ -689,6 +774,14 @@ def update_phase_machine(
         swing_foot_link,
         initial_foot_pos,
     )
+    phase_com_ref = compute_phase_com_target(
+        c,
+        phase_state,
+        initial_foot_pos,
+        phase_state.locked_support_foot_link,
+        swing_foot_link,
+    )
+    forward_error, forward_velocity = compute_forward_handoff_metrics(c, c_dot, phase_com_ref)
 
     if phase_state.phase == ControlPhase.LOAD_SHIFT:
         load_shift_ready = (
@@ -722,6 +815,8 @@ def update_phase_machine(
             and load_shift_metrics.swing_force <= PRE_LIFTOFF_SWING_FORCE_MAX
             and load_shift_metrics.com_shift_ratio >= PRE_LIFTOFF_COM_RATIO
             and load_shift_metrics.com_speed <= COM_VEL_READY_THRESH
+            and abs(forward_error) <= PRE_LIFTOFF_FORWARD_ERROR_THRESH
+            and abs(forward_velocity) <= PRE_LIFTOFF_FORWARD_VEL_THRESH
             and load_shift_metrics.support_slip <= SLIP_THRESH
             and load_shift_metrics.swing_slip <= SLIP_THRESH
         )
@@ -743,7 +838,9 @@ def update_phase_machine(
                     "single-support control "
                     f"(support={support_name(candidate_foot_links, phase_state.locked_support_foot_link)}, "
                     f"support_ratio={load_shift_metrics.support_ratio:.2f}, "
-                    f"swing_force={load_shift_metrics.swing_force:.1f}N)"
+                    f"swing_force={load_shift_metrics.swing_force:.1f}N, "
+                    f"forward_error={forward_error:.3f}m, "
+                    f"forward_vel={forward_velocity:.3f}m/s)"
                 )
         else:
             phase_state.ready_since = None
@@ -791,6 +888,7 @@ def main():
     mpc = CentroidalMPC()
     wbc = WholeBodyController(robot.nv)
     wbc_ss = WholeBodyController(robot.nv, num_contacts=4)
+    wbc_ss_with_swing = WholeBodyController(robot.nv, num_contacts=5)
 
     # -----------------------------------------------------------------
     # Load optimized single-support pose for SINGLE_SUPPORT target
@@ -993,8 +1091,7 @@ def main():
             if use_wbc:
                 single_support_elapsed = phase_elapsed(phase_state, t)
                 if (
-                    phase_state.single_support_established
-                    and single_support_elapsed >= SINGLE_SUPPORT_MPC_DELAY
+                    single_support_elapsed >= SINGLE_SUPPORT_MPC_DELAY
                     and step % mpc_period == 0
                 ):
                     A_d, B_d, d_d = compute_centroidal_dynamics(robot.total_mass, c, p_foot, T_S)
@@ -1005,7 +1102,7 @@ def main():
                         mpc_time_log.append(mpc_result["solve_time"])
                     else:
                         print(f"[WARN] t={t:.3f}s MPC 求解失败")
-                if phase_state.single_support_established:
+                if single_support_elapsed >= SINGLE_SUPPORT_MPC_DELAY:
                     blend_progress = max(
                         0.0,
                         single_support_elapsed - SINGLE_SUPPORT_MPC_DELAY,
@@ -1024,13 +1121,47 @@ def main():
                 f_ref = u_ref.copy()
                 mpc_force_target = u_ref.copy()
     
+            active_wbc_solver = wbc_ss
             if use_wbc and step % wbc_period == 0:
                 M = robot.compute_mass_matrix(q)
                 C = robot.compute_coriolis_gravity(q, v)
-                J_c = np.vstack([
+                modeled_swing_contact = should_model_swing_contact(
+                    phase_state, load_shift_metrics
+                )
+                swing_metrics_pre = (
+                    robot.get_contact_metrics(swing_foot_link)
+                    if modeled_swing_contact
+                    else None
+                )
+                contact_jacobians = [
                     robot.get_foot_jacobian(support_foot_link, q, local_position=lp)
                     for lp in support_contact_local_positions
-                ])
+                ]
+                residual_swing_force = 0.0
+                if (
+                    swing_metrics_pre is not None
+                    and swing_metrics_pre["normal_force"] > SINGLE_SUPPORT_HOLD_FORCE
+                ):
+                    swing_contact_local_position = world_point_to_local_body_point(
+                        robot,
+                        swing_foot_link,
+                        swing_metrics_pre["cop_position"],
+                    )
+                    contact_jacobians.append(
+                        robot.get_foot_jacobian(
+                            swing_foot_link,
+                            q,
+                            local_position=swing_contact_local_position,
+                        )
+                    )
+                    residual_swing_force = min(
+                        float(swing_metrics_pre["normal_force"]),
+                        max(float(f_ref[2]) - SINGLE_SUPPORT_HOLD_FORCE, 0.0),
+                    )
+                modeled_swing_contact = len(contact_jacobians) == 5
+                active_wbc_ss = wbc_ss_with_swing if modeled_swing_contact else wbc_ss
+                active_wbc_solver = active_wbc_ss
+                J_c = np.vstack(contact_jacobians)
                 J_com = robot.get_com_jacobian(q)
                 J_L = robot.get_angular_momentum_jacobian(q)
                 Jc_dot = np.zeros_like(J_c)
@@ -1105,7 +1236,7 @@ def main():
                     direct_cfg.wrench.yaw_moment_max,
                 ))
     
-                total_normal_force = f_ref[2]
+                total_normal_force = max(f_ref[2] - residual_swing_force, SINGLE_SUPPORT_HOLD_FORCE)
                 force_task_matrix, force_task_ref, force_task_weight = build_corner_patch_wrench_task(
                     support_contact_local_positions,
                     foot_origin,
@@ -1118,12 +1249,20 @@ def main():
                 f_ref_12d = compute_corner_patch_wrench_force_reference(
                     force_task_matrix, force_task_ref
                 )
+                if modeled_swing_contact:
+                    swing_force_ref = np.array([0.0, 0.0, residual_swing_force], dtype=float)
+                    f_ref_ss = np.concatenate([f_ref_12d, swing_force_ref])
+                    force_task_matrix = np.hstack(
+                        [force_task_matrix, np.zeros((force_task_matrix.shape[0], 3))]
+                    )
+                else:
+                    f_ref_ss = f_ref_12d
     
-                wbc_result = wbc_ss.solve(
+                wbc_result = active_wbc_ss.solve(
                     M, C, J_c, np.zeros_like(J_c),
                     J_com, J_L,
                     c_ddot_des, L_dot_des,
-                    f_ref_12d, v,
+                    f_ref_ss, v,
                     tau_min_limits, tau_max_limits,
                     force_task_matrix=force_task_matrix,
                     force_task_ref=force_task_ref,
@@ -1157,6 +1296,7 @@ def main():
                 swing_leg,
                 support_leg,
                 c,
+                c_dot,
                 c_ref,
                 load_shift_metrics,
                 optimized_joint_angles=optimized_joint_angles,
@@ -1205,8 +1345,8 @@ def main():
                 support_alpha = min(1.0, max(0.0, support_force / max(MIN_SUPPORT_FORCE, 1e-6)))
                 max_tau_blend = (
                     SINGLE_SUPPORT_MAX_TAU_BLEND
-                    if phase_state.single_support_established
-                    else SINGLE_SUPPORT_PRE_ESTABLISH_TAU_BLEND
+                    if phase_state.phase == ControlPhase.SINGLE_SUPPORT
+                    else 1.0
                 )
                 effective_alpha = min(
                     max_tau_blend,
@@ -1218,9 +1358,10 @@ def main():
                 )
     
                 if (wbc_result is None or support_force < hold_force_threshold) and step - phase_state.last_wbc_warn_step >= 60:
-                    if J_c is not None and J_c.shape[0] == 24:
-                        # Corner-patch: extract linear Jacobians from 4 spatial Jacobians
-                        J_c_lin = np.vstack([J_c[6 * i : 6 * i + 3, :] for i in range(4)])
+                    if J_c is not None and J_c.shape[0] % 6 == 0:
+                        J_c_lin = np.vstack(
+                            [J_c[6 * i : 6 * i + 3, :] for i in range(J_c.shape[0] // 6)]
+                        )
                     else:
                         J_c_lin = J_c[:3, :] if J_c is not None else np.zeros((3, robot.nv))
                     J_c_gram = J_c_lin @ J_c_lin.T
@@ -1228,7 +1369,7 @@ def main():
                     fallback_reason = (
                         f"support force below hold threshold ({support_force:.1f}N)"
                         if support_force < hold_force_threshold
-                        else f"solver status={wbc.last_status}"
+                        else f"solver status={active_wbc_solver.last_status}"
                     )
                     print(
                         f"[WARN] t={t:.3f}s using fallback support torque: {fallback_reason}, "
@@ -1257,15 +1398,15 @@ def main():
     
             tau_log.append(applied_tau.copy())
             if wbc_result is not None:
-                # Aggregate 4 corner forces (12D) to single 3D force for logging
-                f_12d = wbc_result["f"]
-                if f_12d.shape[0] == 12:
+                # Aggregate all modeled 3D contact forces for logging
+                f_opt = wbc_result["f"]
+                if f_opt.shape[0] % 3 == 0:
                     f_aggregate = np.zeros(3)
-                    for i in range(4):
-                        f_aggregate += f_12d[3 * i : 3 * i + 3]
+                    for i in range(f_opt.shape[0] // 3):
+                        f_aggregate += f_opt[3 * i : 3 * i + 3]
                     wbc_f_log.append(f_aggregate)
                 else:
-                    wbc_f_log.append(f_12d.copy())
+                    wbc_f_log.append(f_opt.copy())
                 wbc_time_log.append(wbc_result["solve_time"])
             else:
                 wbc_f_log.append(np.zeros(3))
@@ -1289,6 +1430,8 @@ def main():
                     f"com_shift={load_shift_metrics.com_shift_ratio:.2f}  "
                     f"swing_force={load_shift_metrics.swing_force:.1f}N  "
                     f"com_speed={load_shift_metrics.com_speed:.3f}m/s  "
+                    f"forward_error={c[0] - c_ref[0]:.3f}m  "
+                    f"forward_vel={c_dot[0]:.3f}m/s  "
                     f"swing_slip={load_shift_metrics.swing_slip*1000:.2f}mm  "
                     f"unload={compute_swing_unload_factor(phase_state, t, load_shift_metrics):.2f}  "
                     f"entry={entry_progress:.2f}  "
