@@ -4,6 +4,8 @@ import logging
 import sys
 from pathlib import Path
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from typing import List
 
@@ -149,3 +151,28 @@ def compute_rmse(actual: List[np.ndarray], reference: List[np.ndarray]) -> float
     actual_arr = np.stack(actual)
     ref_arr = np.stack(reference)
     return float(np.sqrt(np.mean(np.sum((actual_arr - ref_arr) ** 2, axis=1))))
+
+
+def compute_pd_torque(
+    q_target: np.ndarray,
+    q_current: np.ndarray,
+    qd_current: np.ndarray,
+    kp: float,
+    kd: float,
+    tau_limit: np.ndarray,
+) -> np.ndarray:
+    """Simple joint-space PD torque for MuJoCo motor actuators."""
+    tau = kp * (q_target - q_current) - kd * qd_current
+    return np.clip(tau, -tau_limit, tau_limit)
+
+
+def get_leg_joint_names(side: str) -> list[str]:
+    """Return the 6 actuated joints of one leg."""
+    return [
+        f"{side}_hip_pitch_joint",
+        f"{side}_hip_roll_joint",
+        f"{side}_hip_yaw_joint",
+        f"{side}_knee_joint",
+        f"{side}_ankle_pitch_joint",
+        f"{side}_ankle_roll_joint",
+    ]

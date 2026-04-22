@@ -10,7 +10,7 @@ from pathlib import Path
 
 from direct_single_support_config import DIRECT_SINGLE_SUPPORT_CONFIG as cfg
 import wbc as wbc_module
-from main import compute_pd_torque, get_leg_joint_names
+from utils import compute_pd_torque, get_leg_joint_names
 from robot_model import RobotModel
 from state_estimator import StateEstimator
 from wbc import WholeBodyController
