@@ -82,15 +82,16 @@ The robot **falls during SINGLE_SUPPORT** every time. Observed sequence:
 
 ---
 
-## 4. Configuration Changes Applied During This Session
+## 4. Configuration / Logic Changes Applied During This Session
 
 | Parameter | Old Value | New Value | Rationale |
 |-----------|-----------|-----------|-----------|
 | `SIM_DURATION` | 3.0 s | 4.0 s | Give more time for stabilization |
 | `PRE_LIFTOFF_SWING_FORCE_MAX` | 110 N | 150 N | Allow entry with remaining swing contact |
 | `COM_VEL_READY_THRESH` | 0.20 m/s | 0.35 m/s | Relax CoM speed requirement |
-| `SINGLE_SUPPORT_PRE_ESTABLISH_TAU_BLEND` | 0.20 | 0.70 | Increase WBC authority early (reverted from 0.20->0.70) |
 | `SINGLE_SUPPORT_MAX_TAU_BLEND` | 0.45 | 0.85 | Increase max WBC authority |
+| `PRE_LIFTOFF_FORWARD_ERROR_THRESH` | N/A | 0.05 m | Block handoff when forward CoM position error is still large |
+| `PRE_LIFTOFF_FORWARD_VEL_THRESH` | N/A | 0.12 m/s | Block handoff when forward CoM velocity is still large |
 | `BASE_DOF_DAMPING` | 5.0 | 10.0 | Increase base damping (reverted) |
 | `JOINT_DOF_DAMPING` | 10.0 | 20.0 | Increase joint damping (reverted) |
 | `POSTURE_KP` | 80.0 | 120.0 | Stiffer posture (reverted) |
@@ -100,32 +101,66 @@ The robot **falls during SINGLE_SUPPORT** every time. Observed sequence:
 
 ---
 
-## 5. Likely Next Steps (Not Yet Attempted)
+## 5. Follow-Up Experiments Attempted After the Initial Report
 
-### 5.1 Model the Swing Foot as a 5th Contact Point
-- During early `SINGLE_SUPPORT`, when swing force is still significant, include the swing foot as an additional contact point in the WBC.
-- Gradually reduce its weight or remove it once swing force drops below a threshold (e.g., 20 N).
-- This eliminates the dynamics model mismatch at the critical entry moment.
+### 5.1 Experiment Log
 
-### 5.2 Start WBC at High Blend Immediately
-- Bypass the `single_support_established` guard and start with `SINGLE_SUPPORT_MAX_TAU_BLEND` immediately upon entering `SINGLE_SUPPORT`.
-- The establishment guard was designed for safety, but in this case the low blend is the primary cause of instability.
-- Alternatively, base the blend on elapsed time in `SINGLE_SUPPORT` rather than on establishment conditions.
+| ID | Change | Key Observations | Outcome |
+|----|--------|------------------|---------|
+| A | **Model residual swing contact as a 5th WBC contact** during early `SINGLE_SUPPORT` | WBC now solves with the correct contact topology when the swing foot still carries load. At `t=2.996s`: CoM `[0.145, -0.064, 0.662]`, swing force `38.6 N`, support slip `17.4 mm`. Max foot slip `~305 mm`. | **Helpful but insufficient.** Removes the worst model mismatch, but the robot still falls. |
+| B | **Uncap WBC authority immediately** in `SINGLE_SUPPORT` (`SINGLE_SUPPORT_MAX_TAU_BLEND` available without waiting for `single_support_established`) | Max foot slip increased from `~305 mm` to `~455 mm`. CoM RMSE `0.2421 m`. | **Negative result.** More support torque authority alone does not fix the problem; it can amplify a bad handoff state. |
+| C | **Blend toward the optimized single-support pose earlier** in `PRE_LIFTOFF` and add **forward CoM PD** on support-leg pitch | Entered `SINGLE_SUPPORT` slightly earlier (`t=2.617s`). At `t=2.996s`: CoM `[0.194, -0.099, 0.646]`, swing force `0 N`, CoM speed `0.298 m/s`. Max foot slip `~375.8 mm`. | **Mixed result.** Swing-foot unloading improved, but the forward state at handoff was still too dynamic. |
+| D | **Start MPC by elapsed time** after `SINGLE_SUPPORT_MPC_DELAY` instead of waiting for `single_support_established` | MPC solved in `SINGLE_SUPPORT` (`~1.12 ms` at `t=2.996s`), proving the establishment gate was no longer blocking the controller path. Max foot slip `~399.4 mm`. | **Helpful for diagnosis, not for stabilization.** MPC was active, but it still could not recover the bad entry state. |
+| E | **Tighten the `PRE_LIFTOFF -> SINGLE_SUPPORT` gate** using explicit forward CoM limits (`0.05 m`, `0.12 m/s`) | The robot **never entered `SINGLE_SUPPORT`**. At `t=2.996s` while still in `PRE_LIFTOFF`: forward error `0.134 m`, forward velocity `0.243 m/s`. Max foot slip `~340.6 mm`. | **Useful diagnostic result.** The handoff gate now correctly blocks clearly bad forward states. |
+| F | **Activate support-foot WBC already in `PRE_LIFTOFF`** (keep MPC off there) | WBC solved in `PRE_LIFTOFF` (`~0.21 ms`), but the state got worse. At `t=2.996s`: forward error `0.213 m`, forward velocity `0.548 m/s`. Max foot slip `~651.4 mm`. | **Rejected.** Full support-foot WBC during the double-contact unloading phase is too aggressive / mismatched. |
 
-### 5.3 Reduce the Initial Perturbation
-- Improve `PRE_LIFTOFF` balance control:
-  - Use a simplified balance controller (e.g., ankle strategy or LIPM-based CoM feedback) to actively drive CoM velocity toward zero before liftoff.
-  - Apply arm counterbalance targets during `PRE_LIFTOFF` to match the optimized single-support pose.
-  - Consider pre-positioning the base closer to the optimized pose (lateral shift, roll) before entering `SINGLE_SUPPORT`.
+### 5.2 Stable Checkpoint vs Withdrawn Experiment
 
-### 5.4 Compute Non-Zero `Jc_dot`
-- Currently `Jc_dot = np.zeros_like(J_c)` is passed to `wbc.solve`.
-- Computing the actual contact Jacobian time derivative would make the no-slip constraint account for current foot velocity, potentially reducing initial slip.
-- However, this is a secondary issue compared to the unmodeled contact and low blend problems.
+- **Committed checkpoint:** `14dbeb3` (`Improve single-support handoff control`)
+  - Includes experiments **A-E**:
+    - 5th swing-contact modeling in early `SINGLE_SUPPORT`
+    - Full single-support WBC authority
+    - Earlier optimized-pose blending and forward CoM PD in `PRE_LIFTOFF`
+    - Time-based MPC activation in `SINGLE_SUPPORT`
+    - Forward-error / forward-velocity handoff gate
+- **Withdrawn experiment:** **F** (active WBC already in `PRE_LIFTOFF`)
+  - This experiment was run after `14dbeb3`, produced significantly worse results, and has been removed from `main.py`.
+  - It remains documented here because it materially changed the diagnosis: a full direct single-support WBC strategy should not be moved earlier into the double-contact unloading phase.
 
 ---
 
-## 6. Test Commands
+## 6. Current Interpretation
+
+The follow-up experiments substantially narrowed the failure source:
+
+1. **The original model-mismatch problem is real and is now fixed.**
+   - Adding the swing foot as a temporary 5th contact removed the most obvious WBC dynamics inconsistency at single-support entry.
+2. **Low WBC authority was not the dominant root cause.**
+   - Removing the pre-establish blend cap made performance worse, not better.
+3. **The MPC establishment gate was not the dominant blocker either.**
+   - Once MPC was allowed to run on time, it solved normally but still could not recover the entry disturbance.
+4. **The remaining bottleneck is upstream of `SINGLE_SUPPORT`.**
+   - The real problem is that `PRE_LIFTOFF` still cannot reduce forward CoM error / velocity enough before handoff.
+5. **A full direct single-support WBC strategy should not simply be moved into `PRE_LIFTOFF`.**
+   - In the double-contact unloading phase, that control law is too aggressive and destabilizing.
+
+---
+
+## 7. Recommended Next Move
+
+The next experiment should **not** be more single-support force authority.  
+It should be a **bounded, simpler forward-balance controller in `PRE_LIFTOFF`**, for example:
+
+- keep the stricter forward handoff gate,
+- keep the earlier optimized-pose blending,
+- **remove the `PRE_LIFTOFF` full WBC experiment**, and
+- add a limited support-leg **ankle/hip pitch strategy** driven by forward CoM error and forward CoM velocity.
+
+This is the most plausible next step because the current evidence says the controller must arrive at handoff with a calmer forward state, rather than trying to recover after the disturbance is already too large.
+
+---
+
+## 8. Test Commands
 
 ```bash
 # Run the full transition simulation
