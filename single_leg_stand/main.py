@@ -92,6 +92,7 @@ def update_phase_machine(
     t: float,
     c: np.ndarray,
     c_dot: np.ndarray,
+    L: np.ndarray,
     foot_contacts: list[dict],
     preferred_support_foot_link: int,
     swing_foot_link: int,
@@ -112,6 +113,8 @@ def update_phase_machine(
             candidate_foot_links,
             initial_foot_pos,
             preferred_support_foot_link,
+            c_dot,
+            L,
         )
 
     load_shift_metrics = compute_load_shift_metrics(
@@ -309,6 +312,7 @@ def main() -> None:
                 t,
                 c,
                 c_dot,
+                L,
                 foot_contacts,
                 preferred_support_foot_link,
                 swing_foot_link,

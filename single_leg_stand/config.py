@@ -8,7 +8,7 @@ import numpy as np
 DT_SIM = 0.001                # Simulation step [s]
 WBC_FREQ = 250                # WBC 控制频率 [Hz] (effective rate with DT_SIM=0.001)
 MPC_FREQ = 20                 # MPC 重求解频率 [Hz] (= 50 ms 周期)
-SIM_DURATION = 4.0            # 总仿真时长 [s]
+SIM_DURATION = 6.0            # 总仿真时长 [s]
 GRAVITY = np.array([0.0, 0.0, -9.81])
 MU = 0.8                      # 地面摩擦系数
 
@@ -121,10 +121,13 @@ PRE_LIFTOFF_FORWARD_VEL_THRESH = 0.12
 # Phase machine
 # ---------------------------------------------------------------------------
 INIT_SETTLE_TIME = 0.20
-DOUBLE_SUPPORT_READY_TIME = 0.60
+DOUBLE_SUPPORT_READY_TIME = 1.00
 LOAD_SHIFT_TIME = 0.20
 PRE_LIFTOFF_TIME = 0.50
 DOUBLE_SUPPORT_MIN_FORCE = 120.0
+DOUBLE_SUPPORT_MAX_COM_VEL = 0.05       # CoM 速度上限 [m/s]
+DOUBLE_SUPPORT_MAX_L_NORM = 0.50        # 角动量上限 [kg·m²/s]
+DOUBLE_SUPPORT_FORCE_RATIO_MIN = 0.35   # 双足力比 min/total
 PRE_LIFTOFF_SWING_PROGRESS = 0.25
 LOAD_SHIFT_READY_TIME = 0.08
 PRE_LIFTOFF_READY_TIME = 0.10

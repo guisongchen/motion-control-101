@@ -9,6 +9,9 @@ import numpy as np
 from config import (
     DOUBLE_SUPPORT_READY_TIME,
     DOUBLE_SUPPORT_MIN_FORCE,
+    DOUBLE_SUPPORT_MAX_COM_VEL,
+    DOUBLE_SUPPORT_MAX_L_NORM,
+    DOUBLE_SUPPORT_FORCE_RATIO_MIN,
     SLIP_THRESH,
     MIN_SUPPORT_FORCE,
 )
@@ -42,6 +45,8 @@ def check_double_support_transition(
     candidate_foot_links: list[int],
     initial_foot_pos: dict[int, np.ndarray],
     preferred_support_foot_link: int,
+    c_dot: np.ndarray,
+    L: np.ndarray,
 ) -> Optional[str]:
     """Transition to LOAD_SHIFT when both feet are stable and loaded."""
     double_support_forces = [
@@ -59,7 +64,16 @@ def check_double_support_transition(
 
     both_feet_ready = all(force >= DOUBLE_SUPPORT_MIN_FORCE for force in double_support_forces)
     stable_slip = max_double_support_slip <= SLIP_THRESH
-    if both_feet_ready and stable_slip:
+
+    com_vel_ok = float(np.linalg.norm(c_dot)) <= DOUBLE_SUPPORT_MAX_COM_VEL
+    momentum_ok = float(np.linalg.norm(L)) <= DOUBLE_SUPPORT_MAX_L_NORM
+
+    total_force = sum(double_support_forces)
+    balanced = False
+    if total_force > 1e-6:
+        balanced = (min(double_support_forces) / total_force) >= DOUBLE_SUPPORT_FORCE_RATIO_MIN
+
+    if both_feet_ready and stable_slip and com_vel_ok and momentum_ok and balanced:
         if phase_state.ready_since is None:
             phase_state.ready_since = t
         if t - phase_state.ready_since >= DOUBLE_SUPPORT_READY_TIME:
