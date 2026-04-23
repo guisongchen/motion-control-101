@@ -10,8 +10,11 @@ from scipy.optimize import minimize
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from direct_single_support_config import DIRECT_SINGLE_SUPPORT_CONFIG as cfg
-from direct_single_support import build_direct_pose, quat_from_roll
+from direct_single_support import (
+    build_direct_pose,
+    quat_from_roll,
+    DIRECT_SINGLE_SUPPORT_CONFIG as cfg,
+)
 from robot_model import RobotModel
 
 

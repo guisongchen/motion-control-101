@@ -1,0 +1,153 @@
+"""Core enums, dataclasses, and phase-agnostic helpers for the control state machine."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum, auto
+from typing import Optional
+
+import numpy as np
+
+from config import GRAVITY
+from robot_model import RobotModel
+
+
+class ControlPhase(Enum):
+    """High-level task phases for single-support standing."""
+
+    INIT_SETTLE = auto()
+    DOUBLE_SUPPORT_HOLD = auto()
+    LOAD_SHIFT = auto()
+    PRE_LIFTOFF = auto()
+    SINGLE_SUPPORT = auto()
+
+
+@dataclass
+class PhaseState:
+    """Track phase machine progress and persistent control context."""
+
+    phase: ControlPhase
+    phase_start_time: float
+    ready_since: Optional[float]
+    locked_support_foot_link: int
+    filtered_support_point: np.ndarray
+    last_valid_support_tau: Optional[np.ndarray]
+    last_wbc_warn_step: int
+    single_support_com_ref: Optional[np.ndarray]
+    single_support_joint_ref: Optional[np.ndarray]
+    single_support_ready_since: Optional[float]
+    single_support_established: bool
+
+
+def skew(v: np.ndarray) -> np.ndarray:
+    """向量叉乘矩阵。"""
+    return np.array([
+        [0.0, -v[2], v[1]],
+        [v[2], 0.0, -v[0]],
+        [-v[1], v[0], 0.0],
+    ])
+
+
+def compute_centroidal_dynamics(
+    m: float, c: np.ndarray, p_foot: np.ndarray, dt: float
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Linearize centroidal dynamics around the current support point."""
+    A_d = np.eye(9)
+    A_d[0:3, 3:6] = dt * np.eye(3)
+
+    B_d = np.zeros((9, 3))
+    B_d[3:6, :] = dt * np.eye(3) / m
+    r = p_foot - c
+    B_d[6:9, :] = dt * skew(r)
+
+    d_d = np.zeros(9)
+    d_d[3:6] = dt * (-GRAVITY)
+
+    return A_d, B_d, d_d
+
+
+def format_vector(vec: np.ndarray) -> str:
+    """Compact vector formatter for runtime diagnostics."""
+    return "[" + ", ".join(f"{x:.2f}" for x in vec) + "]"
+
+
+def get_contact_entry(foot_contacts: list[dict], link: int) -> Optional[dict]:
+    """Return the contact record for one foot link."""
+    return next((fc for fc in foot_contacts if fc["link"] == link), None)
+
+
+def support_name(candidate_foot_links: list[int], link: int) -> str:
+    """Map support link index back to the configured foot name."""
+    from config import FOOT_LINK_NAMES
+
+    return FOOT_LINK_NAMES[candidate_foot_links.index(link)]
+
+
+def transition_phase(phase_state: PhaseState, new_phase: ControlPhase, t: float) -> None:
+    """Switch phases and reset per-phase timers."""
+    phase_state.phase = new_phase
+    phase_state.phase_start_time = t
+    phase_state.ready_since = None
+    if new_phase != ControlPhase.SINGLE_SUPPORT:
+        phase_state.single_support_com_ref = None
+        phase_state.single_support_joint_ref = None
+        phase_state.single_support_ready_since = None
+        phase_state.single_support_established = False
+
+
+def phase_elapsed(phase_state: PhaseState, t: float) -> float:
+    """Elapsed wall-clock simulation time inside the current phase."""
+    return t - phase_state.phase_start_time
+
+
+def world_point_to_local_body_point(
+    robot: RobotModel,
+    link: int,
+    world_point: np.ndarray,
+) -> np.ndarray:
+    """Express a world-frame contact point in the queried body frame."""
+    foot_origin = np.array(robot.data.xpos[link], copy=True)
+    foot_rotation = np.array(robot.data.xmat[link]).reshape(3, 3)
+    return foot_rotation.T @ (np.asarray(world_point, dtype=float) - foot_origin)
+
+
+def compute_phase_com_target(
+    nominal_c_ref: np.ndarray,
+    phase_state: PhaseState,
+    initial_foot_pos: dict[int, np.ndarray],
+    support_foot_link: int,
+    swing_foot_link: int,
+) -> np.ndarray:
+    """Shift the CoM reference toward the support foot before liftoff."""
+    from config import LOAD_SHIFT_COM_RATIO, PRE_LIFTOFF_COM_RATIO, SINGLE_SUPPORT_COM_RATIO
+
+    c_ref = nominal_c_ref.copy()
+    if phase_state.phase in (ControlPhase.INIT_SETTLE, ControlPhase.DOUBLE_SUPPORT_HOLD):
+        return c_ref
+    if (
+        phase_state.phase == ControlPhase.SINGLE_SUPPORT
+        and phase_state.single_support_com_ref is not None
+    ):
+        return phase_state.single_support_com_ref.copy()
+
+    support_xy = initial_foot_pos[support_foot_link][:2]
+    swing_xy = initial_foot_pos[swing_foot_link][:2]
+    stance_midpoint = 0.5 * (support_xy + swing_xy)
+    if phase_state.phase == ControlPhase.LOAD_SHIFT:
+        target_ratio = LOAD_SHIFT_COM_RATIO
+    elif phase_state.phase == ControlPhase.PRE_LIFTOFF:
+        target_ratio = PRE_LIFTOFF_COM_RATIO
+    else:
+        target_ratio = SINGLE_SUPPORT_COM_RATIO
+    target_xy = stance_midpoint + target_ratio * (support_xy - stance_midpoint)
+    c_ref[:2] = target_xy
+    return c_ref
+
+
+def compute_forward_handoff_metrics(
+    c: np.ndarray,
+    c_dot: np.ndarray,
+    c_ref: np.ndarray,
+) -> tuple[float, float]:
+    """Return forward CoM position error and x velocity for handoff gating."""
+    return float(c[0] - c_ref[0]), float(c_dot[0])
