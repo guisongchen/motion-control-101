@@ -37,6 +37,66 @@ class PhaseState:
     single_support_joint_ref: Optional[np.ndarray]
     single_support_ready_since: Optional[float]
     single_support_established: bool
+    # Filter state for single-support CoP / support-position feedback
+    filtered_cop_world: Optional[np.ndarray] = None
+    prev_filtered_cop_world: Optional[np.ndarray] = None
+    filtered_support_position_world: Optional[np.ndarray] = None
+    prev_filtered_support_position_world: Optional[np.ndarray] = None
+
+
+@dataclass
+class CentroidalState:
+    """Full centroidal state at one timestep."""
+
+    q: np.ndarray
+    v: np.ndarray
+    c: np.ndarray
+    c_dot: np.ndarray
+    L: np.ndarray
+
+
+@dataclass
+class TaskReference:
+    """Desired centroidal targets for MPC / WBC."""
+
+    c: np.ndarray
+    c_dot: np.ndarray
+    c_ddot: np.ndarray
+    L: np.ndarray
+    L_dot: np.ndarray
+
+
+@dataclass
+class SupportContext:
+    """Geometric and contact context for the support / swing feet."""
+
+    p_foot: np.ndarray
+    support_foot_link: int
+    swing_foot_link: int
+    foot_contacts: list[dict]
+    contact_local_positions: list[np.ndarray]
+    initial_contact: np.ndarray
+    initial_yaw: float
+
+
+@dataclass
+class SolverConfig:
+    """MPC / WBC solvers and their execution periods."""
+
+    mpc: object
+    wbc_ss: object
+    wbc_ss_with_swing: object
+    mpc_period: int
+    wbc_period: int
+
+
+@dataclass
+class ControlMemory:
+    """Mutable control outputs carried across timesteps."""
+
+    mpc_force_target: np.ndarray
+    mpc_result: object
+    wbc_result: object
 
 
 def skew(v: np.ndarray) -> np.ndarray:

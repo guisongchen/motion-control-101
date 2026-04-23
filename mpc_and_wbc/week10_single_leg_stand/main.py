@@ -51,6 +51,11 @@ from utils import (
 from phase_core import (
     ControlPhase,
     PhaseState,
+    CentroidalState,
+    TaskReference,
+    SupportContext,
+    SolverConfig,
+    ControlMemory,
     get_contact_entry,
     support_name,
     format_vector,
@@ -202,11 +207,7 @@ def main() -> None:
         wbc_module.Kd_L,
     )
 
-    # CoP / support position filter state (activated in SINGLE_SUPPORT)
-    filtered_cop_world = np.array(initial_support_metrics["cop_position"], copy=True)
-    prev_filtered_cop_world = filtered_cop_world.copy()
-    filtered_support_position_world = np.array(initial_support_metrics["position"], copy=True)
-    prev_filtered_support_position_world = filtered_support_position_world.copy()
+    # Single-support geometry (activated in SINGLE_SUPPORT)
     initial_support_yaw = yaw_from_rotation(
         np.array(robot.data.xmat[preferred_support_foot_link]).reshape(3, 3)
     )
@@ -253,6 +254,10 @@ def main() -> None:
         single_support_joint_ref=None,
         single_support_ready_since=None,
         single_support_established=False,
+        filtered_cop_world=np.array(initial_support_metrics["cop_position"], copy=True),
+        prev_filtered_cop_world=np.array(initial_support_metrics["cop_position"], copy=True),
+        filtered_support_position_world=np.array(initial_support_metrics["position"], copy=True),
+        prev_filtered_support_position_world=np.array(initial_support_metrics["position"], copy=True),
     )
 
     mpc_result = None
@@ -314,10 +319,10 @@ def main() -> None:
                     support_metrics_now = robot.get_contact_metrics(support_foot_link)
                     initial_support_contact = support_metrics_now["position"].copy()
                     initial_support_body = robot.get_link_com_position(support_foot_link).copy()
-                    filtered_cop_world = np.array(support_metrics_now["cop_position"], copy=True)
-                    prev_filtered_cop_world = filtered_cop_world.copy()
-                    filtered_support_position_world = np.array(support_metrics_now["position"], copy=True)
-                    prev_filtered_support_position_world = filtered_support_position_world.copy()
+                    phase_state.filtered_cop_world = np.array(support_metrics_now["cop_position"], copy=True)
+                    phase_state.prev_filtered_cop_world = phase_state.filtered_cop_world.copy()
+                    phase_state.filtered_support_position_world = np.array(support_metrics_now["position"], copy=True)
+                    phase_state.prev_filtered_support_position_world = phase_state.filtered_support_position_world.copy()
                     initial_support_yaw = yaw_from_rotation(
                         np.array(robot.data.xmat[support_foot_link]).reshape(3, 3)
                     )
@@ -378,39 +383,38 @@ def main() -> None:
                         phase_state,
                         t,
                         step,
-                        q,
-                        v,
-                        c,
-                        c_dot,
-                        L,
-                        c_ref,
-                        c_dot_ref,
-                        c_ddot_ref,
-                        L_ref,
-                        L_dot_ref,
-                        p_foot,
-                        support_foot_link,
-                        swing_foot_link,
-                        foot_contacts,
+                        CentroidalState(q=q, v=v, c=c, c_dot=c_dot, L=L),
+                        TaskReference(
+                            c=c_ref,
+                            c_dot=c_dot_ref,
+                            c_ddot=c_ddot_ref,
+                            L=L_ref,
+                            L_dot=L_dot_ref,
+                        ),
+                        SupportContext(
+                            p_foot=p_foot,
+                            support_foot_link=support_foot_link,
+                            swing_foot_link=swing_foot_link,
+                            foot_contacts=foot_contacts,
+                            contact_local_positions=support_contact_local_positions,
+                            initial_contact=initial_support_contact,
+                            initial_yaw=initial_support_yaw,
+                        ),
                         load_shift_metrics,
-                        mpc,
-                        mpc_period,
-                        wbc_ss,
-                        wbc_ss_with_swing,
-                        tau_min_limits,
-                        tau_max_limits,
-                        support_contact_local_positions,
-                        filtered_cop_world,
-                        prev_filtered_cop_world,
-                        filtered_support_position_world,
-                        prev_filtered_support_position_world,
-                        initial_support_contact,
-                        initial_support_yaw,
-                        mpc_force_target,
+                        SolverConfig(
+                            mpc=mpc,
+                            wbc_ss=wbc_ss,
+                            wbc_ss_with_swing=wbc_ss_with_swing,
+                            mpc_period=mpc_period,
+                            wbc_period=wbc_period,
+                        ),
+                        (tau_min_limits, tau_max_limits),
                         u_ref,
-                        mpc_result,
-                        wbc_result,
-                        wbc_period,
+                        ControlMemory(
+                            mpc_force_target=mpc_force_target,
+                            mpc_result=mpc_result,
+                            wbc_result=wbc_result,
+                        ),
                     )
                 )
             else:

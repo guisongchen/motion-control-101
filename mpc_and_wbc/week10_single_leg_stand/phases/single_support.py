@@ -28,6 +28,11 @@ from phase_core import (
     phase_elapsed,
     compute_centroidal_dynamics,
     world_point_to_local_body_point,
+    CentroidalState,
+    TaskReference,
+    SupportContext,
+    SolverConfig,
+    ControlMemory,
 )
 from phase_metrics import LoadShiftMetrics
 from phase_targets import compute_single_support_entry_progress
@@ -108,39 +113,14 @@ def run_single_support_control(
     phase_state: PhaseState,
     t: float,
     step: int,
-    q: np.ndarray,
-    v: np.ndarray,
-    c: np.ndarray,
-    c_dot: np.ndarray,
-    L: np.ndarray,
-    c_ref: np.ndarray,
-    c_dot_ref: np.ndarray,
-    c_ddot_ref: np.ndarray,
-    L_ref: np.ndarray,
-    L_dot_ref: np.ndarray,
-    p_foot: np.ndarray,
-    support_foot_link: int,
-    swing_foot_link: int,
-    foot_contacts: list[dict],
+    state: CentroidalState,
+    refs: TaskReference,
+    support: SupportContext,
     load_shift_metrics: LoadShiftMetrics,
-    mpc,
-    mpc_period: int,
-    wbc_ss,
-    wbc_ss_with_swing,
-    tau_min_limits: np.ndarray,
-    tau_max_limits: np.ndarray,
-    support_contact_local_positions: list[np.ndarray],
-    filtered_cop_world: np.ndarray,
-    prev_filtered_cop_world: np.ndarray,
-    filtered_support_position_world: np.ndarray,
-    prev_filtered_support_position_world: np.ndarray,
-    initial_support_contact: np.ndarray,
-    initial_support_yaw: float,
-    mpc_force_target: np.ndarray,
+    solvers: SolverConfig,
+    tau_limits: tuple[np.ndarray, np.ndarray],
     u_ref: np.ndarray,
-    mpc_result,
-    wbc_result,
-    wbc_period: int,
+    memory: ControlMemory,
 ) -> tuple:
     """Execute MPC and WBC for single support; return updated control values."""
     from direct_single_support import (
@@ -155,14 +135,23 @@ def run_single_support_control(
 
     single_support_elapsed = phase_elapsed(phase_state, t)
 
+    # Unpack grouped arguments for local convenience
+    c = state.c
+    c_dot = state.c_dot
+    L = state.L
+    mpc_force_target = memory.mpc_force_target
+    mpc_result = memory.mpc_result
+    wbc_result = memory.wbc_result
+    tau_min_limits, tau_max_limits = tau_limits
+
     if (
         single_support_elapsed >= SINGLE_SUPPORT_MPC_DELAY
-        and step % mpc_period == 0
+        and step % solvers.mpc_period == 0
     ):
-        A_d, B_d, d_d = compute_centroidal_dynamics(robot.total_mass, c, p_foot, T_S)
-        mpc.set_dynamics(A_d, B_d, d_d)
+        A_d, B_d, d_d = compute_centroidal_dynamics(robot.total_mass, c, support.p_foot, T_S)
+        solvers.mpc.set_dynamics(A_d, B_d, d_d)
         x0 = np.concatenate([c, c_dot, L])
-        mpc_result = mpc.solve(x0)
+        mpc_result = solvers.mpc.solve(x0)
         if mpc_result is not None:
             mpc_force_target = mpc_result["u0"]
         else:
@@ -185,18 +174,18 @@ def run_single_support_control(
     )
 
     # WBC solve
-    if step % wbc_period == 0:
-        M = robot.compute_mass_matrix(q)
-        C = robot.compute_coriolis_gravity(q, v)
+    if step % solvers.wbc_period == 0:
+        M = robot.compute_mass_matrix(state.q)
+        C = robot.compute_coriolis_gravity(state.q, state.v)
         modeled_swing_contact = should_model_swing_contact(phase_state, load_shift_metrics)
         swing_metrics_pre = (
-            robot.get_contact_metrics(swing_foot_link)
+            robot.get_contact_metrics(support.swing_foot_link)
             if modeled_swing_contact
             else None
         )
         contact_jacobians = [
-            robot.get_foot_jacobian(support_foot_link, q, local_position=lp)
-            for lp in support_contact_local_positions
+            robot.get_foot_jacobian(support.support_foot_link, state.q, local_position=lp)
+            for lp in support.contact_local_positions
         ]
         residual_swing_force = 0.0
         if (
@@ -205,13 +194,13 @@ def run_single_support_control(
         ):
             swing_contact_local_position = world_point_to_local_body_point(
                 robot,
-                swing_foot_link,
+                support.swing_foot_link,
                 swing_metrics_pre["cop_position"],
             )
             contact_jacobians.append(
                 robot.get_foot_jacobian(
-                    swing_foot_link,
-                    q,
+                    support.swing_foot_link,
+                    state.q,
                     local_position=swing_contact_local_position,
                 )
             )
@@ -220,58 +209,58 @@ def run_single_support_control(
                 max(float(f_ref[2]) - SINGLE_SUPPORT_HOLD_FORCE, 0.0),
             )
         modeled_swing_contact = len(contact_jacobians) == 5
-        active_wbc_ss = wbc_ss_with_swing if modeled_swing_contact else wbc_ss
+        active_wbc_ss = solvers.wbc_ss_with_swing if modeled_swing_contact else solvers.wbc_ss
         J_c = np.vstack(contact_jacobians)
-        J_com = robot.get_com_jacobian(q)
-        J_L = robot.get_angular_momentum_jacobian(q)
+        J_com = robot.get_com_jacobian(state.q)
+        J_L = robot.get_angular_momentum_jacobian(state.q)
         Jc_dot = np.zeros_like(J_c)
 
-        c_ddot_des = wbc_ss.compute_desired_acceleration(
-            c_ref, c, c_dot_ref, c_dot, c_ddot_ref
+        c_ddot_des = solvers.wbc_ss.compute_desired_acceleration(
+            refs.c, c, refs.c_dot, c_dot, refs.c_ddot
         )
-        L_dot_des = wbc_ss.compute_desired_momentum_rate(
-            L_ref, L, L_dot_ref, np.zeros(3)
+        L_dot_des = solvers.wbc_ss.compute_desired_momentum_rate(
+            refs.L, L, refs.L_dot, np.zeros(3)
         )
 
         # Corner-patch CoP / slip / yaw control
-        foot_origin = np.array(robot.data.xpos[support_foot_link], copy=True)
-        foot_rotation = np.array(robot.data.xmat[support_foot_link]).reshape(3, 3)
+        foot_origin = np.array(robot.data.xpos[support.support_foot_link], copy=True)
+        foot_rotation = np.array(robot.data.xmat[support.support_foot_link]).reshape(3, 3)
 
-        support_metrics_pre = robot.get_contact_metrics(support_foot_link)
+        support_metrics_pre = robot.get_contact_metrics(support.support_foot_link)
         if support_metrics_pre["normal_force"] > 1e-6:
             measured_cop_world = np.array(support_metrics_pre["cop_position"], copy=True)
-            filtered_cop_world[:] = (
+            phase_state.filtered_cop_world[:] = (
                 direct_cfg.cop.filter_alpha * measured_cop_world
-                + (1.0 - direct_cfg.cop.filter_alpha) * filtered_cop_world
+                + (1.0 - direct_cfg.cop.filter_alpha) * phase_state.filtered_cop_world
             )
             measured_support_position_world = np.array(support_metrics_pre["position"], copy=True)
-            filtered_support_position_world[:] = (
+            phase_state.filtered_support_position_world[:] = (
                 direct_cfg.wrench.state_filter_alpha * measured_support_position_world
-                + (1.0 - direct_cfg.wrench.state_filter_alpha) * filtered_support_position_world
+                + (1.0 - direct_cfg.wrench.state_filter_alpha) * phase_state.filtered_support_position_world
             )
 
         measured_cop_velocity_world = (
-            filtered_cop_world - prev_filtered_cop_world
+            phase_state.filtered_cop_world - phase_state.prev_filtered_cop_world
         ) / DT_SIM
-        prev_filtered_cop_world[:] = filtered_cop_world
+        phase_state.prev_filtered_cop_world[:] = phase_state.filtered_cop_world
         measured_support_slip_velocity_world = (
-            filtered_support_position_world - prev_filtered_support_position_world
+            phase_state.filtered_support_position_world - phase_state.prev_filtered_support_position_world
         ) / DT_SIM
-        prev_filtered_support_position_world[:] = filtered_support_position_world
+        phase_state.prev_filtered_support_position_world[:] = phase_state.filtered_support_position_world
 
-        nominal_cop_target_world = initial_support_contact
+        nominal_cop_target_world = support.initial_contact
         cop_target_world = nominal_cop_target_world
         if direct_cfg.cop.enabled:
             cop_target_world, _ = apply_measured_cop_feedback(
-                support_contact_local_positions,
+                support.contact_local_positions,
                 foot_origin,
                 foot_rotation,
                 nominal_cop_target_world,
-                filtered_cop_world,
+                phase_state.filtered_cop_world,
                 measured_cop_velocity_world,
             )
 
-        support_slip_world = filtered_support_position_world - initial_support_contact
+        support_slip_world = phase_state.filtered_support_position_world - support.initial_contact
         desired_force_xy_world = -(
             direct_cfg.wrench.slip_force_kp * support_slip_world[:2]
             + direct_cfg.wrench.slip_force_kd * measured_support_slip_velocity_world[:2]
@@ -283,8 +272,8 @@ def run_single_support_control(
         )
         desired_force_xy_world += f_ref[:2]
 
-        _, support_ang_vel = robot.get_link_velocity(support_foot_link)
-        support_yaw_error = wrap_to_pi(yaw_from_rotation(foot_rotation) - initial_support_yaw)
+        _, support_ang_vel = robot.get_link_velocity(support.support_foot_link)
+        support_yaw_error = wrap_to_pi(yaw_from_rotation(foot_rotation) - support.initial_yaw)
         desired_yaw_moment = -(
             direct_cfg.wrench.yaw_moment_kp * support_yaw_error
             + direct_cfg.wrench.yaw_moment_kd * support_ang_vel[2]
@@ -297,7 +286,7 @@ def run_single_support_control(
 
         total_normal_force = max(f_ref[2] - residual_swing_force, SINGLE_SUPPORT_HOLD_FORCE)
         force_task_matrix, force_task_ref, force_task_weight = build_corner_patch_wrench_task(
-            support_contact_local_positions,
+            support.contact_local_positions,
             foot_origin,
             foot_rotation,
             cop_target_world,
@@ -321,7 +310,7 @@ def run_single_support_control(
             M, C, J_c, np.zeros_like(J_c),
             J_com, J_L,
             c_ddot_des, L_dot_des,
-            f_ref_ss, v,
+            f_ref_ss, state.v,
             tau_min_limits, tau_max_limits,
             force_task_matrix=force_task_matrix,
             force_task_ref=force_task_ref,
@@ -330,7 +319,7 @@ def run_single_support_control(
         if wbc_result is None:
             print(f"[WARN] t={t:.3f}s WBC 求解失败")
     else:
-        active_wbc_ss = wbc_ss
+        active_wbc_ss = solvers.wbc_ss
         J_c = None
 
     return f_ref, mpc_force_target, wbc_result, active_wbc_ss, J_c, mpc_result
