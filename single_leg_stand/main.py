@@ -51,6 +51,7 @@ from utils import (
 from phase_core import (
     ControlPhase,
     PhaseState,
+    SingleSupportState,
     CentroidalState,
     TaskReference,
     SupportContext,
@@ -89,6 +90,7 @@ from direct_single_support import (
 
 def update_phase_machine(
     phase_state: PhaseState,
+    ss_state: SingleSupportState,
     t: float,
     c: np.ndarray,
     c_dot: np.ndarray,
@@ -132,6 +134,7 @@ def update_phase_machine(
     if phase_state.phase == ControlPhase.PRE_LIFTOFF:
         return check_pre_liftoff_transition(
             phase_state,
+            ss_state,
             t,
             load_shift_metrics,
             c,
@@ -262,17 +265,15 @@ def main() -> None:
         ready_since=None,
         locked_support_foot_link=preferred_support_foot_link,
         filtered_support_point=initial_foot_pos[preferred_support_foot_link].copy(),
-        last_valid_support_tau=None,
-        last_wbc_warn_time=-1e9,
-        single_support_com_ref=None,
-        single_support_joint_ref=None,
-        single_support_ready_since=None,
-        single_support_established=False,
+    )
+    ss_state = SingleSupportState(
         filtered_cop_world=np.array(initial_support_metrics["cop_position"], copy=True),
         prev_filtered_cop_world=np.array(initial_support_metrics["cop_position"], copy=True),
         filtered_support_position_world=np.array(initial_support_metrics["position"], copy=True),
         prev_filtered_support_position_world=np.array(initial_support_metrics["position"], copy=True),
     )
+    last_wbc_warn_time = -1e9
+    last_valid_support_tau = None
 
     mpc_result = None
     wbc_result = None
@@ -309,6 +310,7 @@ def main() -> None:
 
             transition_msg = update_phase_machine(
                 phase_state,
+                ss_state,
                 t,
                 c,
                 c_dot,
@@ -334,10 +336,10 @@ def main() -> None:
                     support_metrics_now = robot.get_contact_metrics(support_foot_link)
                     initial_support_contact = support_metrics_now["position"].copy()
                     initial_support_body = robot.get_link_com_position(support_foot_link).copy()
-                    phase_state.filtered_cop_world = np.array(support_metrics_now["cop_position"], copy=True)
-                    phase_state.prev_filtered_cop_world = phase_state.filtered_cop_world.copy()
-                    phase_state.filtered_support_position_world = np.array(support_metrics_now["position"], copy=True)
-                    phase_state.prev_filtered_support_position_world = phase_state.filtered_support_position_world.copy()
+                    ss_state.filtered_cop_world = np.array(support_metrics_now["cop_position"], copy=True)
+                    ss_state.prev_filtered_cop_world = ss_state.filtered_cop_world.copy()
+                    ss_state.filtered_support_position_world = np.array(support_metrics_now["position"], copy=True)
+                    ss_state.prev_filtered_support_position_world = ss_state.filtered_support_position_world.copy()
                     initial_support_yaw = yaw_from_rotation(
                         np.array(robot.data.xmat[support_foot_link]).reshape(3, 3)
                     )
@@ -377,10 +379,11 @@ def main() -> None:
                 swing_foot_link,
                 initial_foot_pos,
             )
-            update_single_support_establishment(phase_state, t, load_shift_metrics)
+            update_single_support_establishment(ss_state, phase_state.phase, t, load_shift_metrics)
             c_ref = compute_phase_com_target(
                 nominal_c_ref,
-                phase_state,
+                phase_state.phase,
+                ss_state.com_ref,
                 initial_foot_pos,
                 phase_state.locked_support_foot_link,
                 swing_foot_link,
@@ -396,6 +399,7 @@ def main() -> None:
                     run_single_support_control(
                         robot,
                         phase_state,
+                        ss_state,
                         t,
                         step,
                         CentroidalState(q=q, v=v, c=c, c_dot=c_dot, L=L),
@@ -439,7 +443,7 @@ def main() -> None:
             # Gradually blend single-support joint reference toward optimized pose
             if (
                 phase_state.phase == ControlPhase.SINGLE_SUPPORT
-                and phase_state.single_support_joint_ref is not None
+                and ss_state.joint_ref is not None
             ):
                 from config import SINGLE_SUPPORT_POSE_BLEND_TIME
 
@@ -447,8 +451,8 @@ def main() -> None:
                     1.0,
                     phase_elapsed(phase_state, t) / max(SINGLE_SUPPORT_POSE_BLEND_TIME, 1e-6),
                 )
-                phase_state.single_support_joint_ref = (
-                    (1.0 - pose_progress) * phase_state.single_support_joint_ref
+                ss_state.joint_ref = (
+                    (1.0 - pose_progress) * ss_state.joint_ref
                     + pose_progress * optimized_joint_angles
                 )
 
@@ -459,6 +463,7 @@ def main() -> None:
                 initial_dof_angles,
                 joint_name_to_dof_idx,
                 phase_state,
+                ss_state.joint_ref,
                 t,
                 swing_leg,
                 support_leg,
@@ -505,13 +510,13 @@ def main() -> None:
                     ),
                 )
                 if wbc_result is not None:
-                    phase_state.last_valid_support_tau = np.clip(
+                    last_valid_support_tau = np.clip(
                         wbc_result["tau"][support_mask],
                         tau_min_limits[support_mask],
                         tau_max_limits[support_mask],
                     )
-                elif phase_state.last_valid_support_tau is None:
-                    phase_state.last_valid_support_tau = safe_tau[support_mask].copy()
+                elif last_valid_support_tau is None:
+                    last_valid_support_tau = safe_tau[support_mask].copy()
 
                 support_alpha = min(1.0, max(0.0, support_force / max(MIN_SUPPORT_FORCE, 1e-6)))
                 max_tau_blend = (
@@ -525,12 +530,12 @@ def main() -> None:
                 )
                 tau_cmd[support_mask] = (
                     (1.0 - effective_alpha) * safe_tau[support_mask]
-                    + effective_alpha * phase_state.last_valid_support_tau
+                    + effective_alpha * last_valid_support_tau
                 )
 
                 if (
                     wbc_result is None or support_force < hold_force_threshold
-                ) and t - phase_state.last_wbc_warn_time >= 0.25:
+                ) and t - last_wbc_warn_time >= 0.25:
                     if J_c is not None and J_c.shape[0] % 6 == 0:
                         J_c_lin = np.vstack(
                             [J_c[6 * i : 6 * i + 3, :] for i in range(J_c.shape[0] // 6)]
@@ -552,7 +557,7 @@ def main() -> None:
                         f"rank(Jc)={np.linalg.matrix_rank(J_c_lin)}, "
                         f"cond(JcJc^T)={J_c_cond:.2e}, f_ref={format_vector(f_ref)}"
                     )
-                    phase_state.last_wbc_warn_time = t
+                    last_wbc_warn_time = t
 
                 applied_tau = tau_cmd.copy()
                 robot.set_joint_torques(applied_tau)
@@ -607,7 +612,7 @@ def main() -> None:
                     f"swing_slip={load_shift_metrics.swing_slip*1000:.2f}mm  "
                     f"unload={compute_swing_unload_factor(phase_state, t, load_shift_metrics):.2f}  "
                     f"entry={entry_progress:.2f}  "
-                    f"established={int(phase_state.single_support_established)}"
+                    f"established={int(ss_state.established)}"
                 )
                 for fc in foot_contacts:
                     link_name = support_name(candidate_foot_links, fc["link"])

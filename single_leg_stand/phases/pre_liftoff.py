@@ -19,6 +19,7 @@ from config import (
 from phase_core import (
     ControlPhase,
     PhaseState,
+    SingleSupportState,
     phase_elapsed,
     transition_phase,
     compute_forward_handoff_metrics,
@@ -28,6 +29,7 @@ from phase_metrics import LoadShiftMetrics
 
 def check_pre_liftoff_transition(
     phase_state: PhaseState,
+    ss_state: SingleSupportState,
     t: float,
     load_shift_metrics: LoadShiftMetrics,
     c: np.ndarray,
@@ -59,15 +61,15 @@ def check_pre_liftoff_transition(
             phase_state.ready_since = t
         if t - phase_state.ready_since >= PRE_LIFTOFF_READY_TIME:
             from phases.single_support import build_single_support_com_ref
-            phase_state.single_support_com_ref = build_single_support_com_ref(
+            ss_state.com_ref = build_single_support_com_ref(
                 c,
                 initial_foot_pos,
                 phase_state.locked_support_foot_link,
                 swing_foot_link,
             )
-            phase_state.single_support_joint_ref = joint_positions.copy()
-            phase_state.single_support_ready_since = None
-            phase_state.single_support_established = False
+            ss_state.joint_ref = joint_positions.copy()
+            ss_state.ready_since = None
+            ss_state.established = False
             transition_phase(phase_state, ControlPhase.SINGLE_SUPPORT, t)
             from phase_core import support_name
             return (

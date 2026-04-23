@@ -345,6 +345,7 @@ def build_safe_targets(
     initial_dof_angles: np.ndarray,
     joint_name_to_dof_idx: dict[str, int],
     phase_state: PhaseState,
+    single_support_joint_ref: np.ndarray | None,
     t: float,
     swing_leg: str,
     support_leg: str,
@@ -357,9 +358,9 @@ def build_safe_targets(
     """Build posture targets for the current phase."""
     if (
         phase_state.phase == ControlPhase.SINGLE_SUPPORT
-        and phase_state.single_support_joint_ref is not None
+        and single_support_joint_ref is not None
     ):
-        targets = phase_state.single_support_joint_ref.copy()
+        targets = single_support_joint_ref.copy()
     else:
         targets = initial_dof_angles.copy()
 
@@ -418,7 +419,7 @@ def build_safe_targets(
             )
 
     # Swing leg trajectory
-    if phase_state.phase == ControlPhase.SINGLE_SUPPORT and phase_state.single_support_joint_ref is not None:
+    if phase_state.phase == ControlPhase.SINGLE_SUPPORT and single_support_joint_ref is not None:
         pose_progress = min(
             1.0,
             phase_elapsed(phase_state, t) / max(SINGLE_SUPPORT_POSE_BLEND_TIME, 1e-6),
@@ -441,19 +442,19 @@ def build_safe_targets(
         if hip_name in joint_name_to_dof_idx:
             hip_idx = joint_name_to_dof_idx[hip_name]
             targets[hip_idx] = (
-                (1.0 - pose_progress) * phase_state.single_support_joint_ref[hip_idx]
+                (1.0 - pose_progress) * single_support_joint_ref[hip_idx]
                 + pose_progress * opt_hip
             )
         if knee_name in joint_name_to_dof_idx:
             knee_idx = joint_name_to_dof_idx[knee_name]
             targets[knee_idx] = (
-                (1.0 - pose_progress) * phase_state.single_support_joint_ref[knee_idx]
+                (1.0 - pose_progress) * single_support_joint_ref[knee_idx]
                 + pose_progress * opt_knee
             )
         if ankle_pitch_name in joint_name_to_dof_idx:
             ankle_pitch_idx = joint_name_to_dof_idx[ankle_pitch_name]
             targets[ankle_pitch_idx] = (
-                (1.0 - pose_progress) * phase_state.single_support_joint_ref[ankle_pitch_idx]
+                (1.0 - pose_progress) * single_support_joint_ref[ankle_pitch_idx]
                 + pose_progress * opt_ankle
             )
     elif hip_name in joint_name_to_dof_idx:
@@ -465,7 +466,7 @@ def build_safe_targets(
 
     if (
         phase_state.phase != ControlPhase.SINGLE_SUPPORT
-        or phase_state.single_support_joint_ref is None
+        or single_support_joint_ref is None
     ) and knee_name in joint_name_to_dof_idx:
         knee_idx = joint_name_to_dof_idx[knee_name]
         targets[knee_idx] = (

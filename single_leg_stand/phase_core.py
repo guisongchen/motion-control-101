@@ -24,20 +24,24 @@ class ControlPhase(Enum):
 
 @dataclass
 class PhaseState:
-    """Track phase machine progress and persistent control context."""
+    """Minimal temporal state for the high-level phase machine."""
 
     phase: ControlPhase
     phase_start_time: float
     ready_since: Optional[float]
     locked_support_foot_link: int
     filtered_support_point: np.ndarray
-    last_valid_support_tau: Optional[np.ndarray]
-    single_support_com_ref: Optional[np.ndarray]
-    single_support_joint_ref: Optional[np.ndarray]
-    single_support_ready_since: Optional[float]
-    single_support_established: bool
+
+
+@dataclass
+class SingleSupportState:
+    """Persistent state for the single-support balancing task."""
+
+    com_ref: Optional[np.ndarray] = None
+    joint_ref: Optional[np.ndarray] = None
+    ready_since: Optional[float] = None
+    established: bool = False
     # Filter state for single-support CoP / support-position feedback
-    last_wbc_warn_time: float = -1e9
     filtered_cop_world: Optional[np.ndarray] = None
     prev_filtered_cop_world: Optional[np.ndarray] = None
     filtered_support_position_world: Optional[np.ndarray] = None
@@ -97,6 +101,7 @@ class ControlMemory:
     mpc_force_target: np.ndarray
     mpc_result: object
     wbc_result: object
+    last_valid_support_tau: Optional[np.ndarray] = None
 
 
 def skew(v: np.ndarray) -> np.ndarray:
@@ -148,11 +153,6 @@ def transition_phase(phase_state: PhaseState, new_phase: ControlPhase, t: float)
     phase_state.phase = new_phase
     phase_state.phase_start_time = t
     phase_state.ready_since = None
-    if new_phase != ControlPhase.SINGLE_SUPPORT:
-        phase_state.single_support_com_ref = None
-        phase_state.single_support_joint_ref = None
-        phase_state.single_support_ready_since = None
-        phase_state.single_support_established = False
 
 
 def phase_elapsed(phase_state: PhaseState, t: float) -> float:
@@ -173,7 +173,8 @@ def world_point_to_local_body_point(
 
 def compute_phase_com_target(
     nominal_c_ref: np.ndarray,
-    phase_state: PhaseState,
+    phase: ControlPhase,
+    single_support_com_ref: Optional[np.ndarray],
     initial_foot_pos: dict[int, np.ndarray],
     support_foot_link: int,
     swing_foot_link: int,
@@ -182,20 +183,17 @@ def compute_phase_com_target(
     from config import LOAD_SHIFT_COM_RATIO, PRE_LIFTOFF_COM_RATIO, SINGLE_SUPPORT_COM_RATIO
 
     c_ref = nominal_c_ref.copy()
-    if phase_state.phase in (ControlPhase.INIT_SETTLE, ControlPhase.DOUBLE_SUPPORT_HOLD):
+    if phase in (ControlPhase.INIT_SETTLE, ControlPhase.DOUBLE_SUPPORT_HOLD):
         return c_ref
-    if (
-        phase_state.phase == ControlPhase.SINGLE_SUPPORT
-        and phase_state.single_support_com_ref is not None
-    ):
-        return phase_state.single_support_com_ref.copy()
+    if phase == ControlPhase.SINGLE_SUPPORT and single_support_com_ref is not None:
+        return single_support_com_ref.copy()
 
     support_xy = initial_foot_pos[support_foot_link][:2]
     swing_xy = initial_foot_pos[swing_foot_link][:2]
     stance_midpoint = 0.5 * (support_xy + swing_xy)
-    if phase_state.phase == ControlPhase.LOAD_SHIFT:
+    if phase == ControlPhase.LOAD_SHIFT:
         target_ratio = LOAD_SHIFT_COM_RATIO
-    elif phase_state.phase == ControlPhase.PRE_LIFTOFF:
+    elif phase == ControlPhase.PRE_LIFTOFF:
         target_ratio = PRE_LIFTOFF_COM_RATIO
     else:
         target_ratio = SINGLE_SUPPORT_COM_RATIO

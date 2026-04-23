@@ -25,6 +25,7 @@ from config import (
 from phase_core import (
     ControlPhase,
     PhaseState,
+    SingleSupportState,
     phase_elapsed,
     compute_centroidal_dynamics,
     world_point_to_local_body_point,
@@ -67,16 +68,17 @@ def build_single_support_com_ref(
 
 
 def update_single_support_establishment(
-    phase_state: PhaseState,
+    ss_state: SingleSupportState,
+    phase: ControlPhase,
     t: float,
     load_shift_metrics: LoadShiftMetrics,
 ) -> None:
     """Only enable optimization after one-leg support looks physically established."""
-    if phase_state.phase != ControlPhase.SINGLE_SUPPORT:
-        phase_state.single_support_ready_since = None
-        phase_state.single_support_established = False
+    if phase != ControlPhase.SINGLE_SUPPORT:
+        ss_state.ready_since = None
+        ss_state.established = False
         return
-    if phase_state.single_support_established:
+    if ss_state.established:
         return
 
     established_ready = (
@@ -88,22 +90,22 @@ def update_single_support_establishment(
         and load_shift_metrics.swing_slip <= SLIP_THRESH
     )
     if not established_ready:
-        phase_state.single_support_ready_since = None
+        ss_state.ready_since = None
         return
-    if phase_state.single_support_ready_since is None:
-        phase_state.single_support_ready_since = t
+    if ss_state.ready_since is None:
+        ss_state.ready_since = t
         return
-    if t - phase_state.single_support_ready_since >= SINGLE_SUPPORT_ESTABLISH_TIME:
-        phase_state.single_support_established = True
+    if t - ss_state.ready_since >= SINGLE_SUPPORT_ESTABLISH_TIME:
+        ss_state.established = True
 
 
 def should_model_swing_contact(
-    phase_state: PhaseState,
+    phase: ControlPhase,
     load_shift_metrics: LoadShiftMetrics,
 ) -> bool:
     """Keep the swing foot in the WBC model while it still carries meaningful load."""
     return (
-        phase_state.phase == ControlPhase.SINGLE_SUPPORT
+        phase == ControlPhase.SINGLE_SUPPORT
         and load_shift_metrics.swing_force > SINGLE_SUPPORT_HOLD_FORCE
     )
 
@@ -111,6 +113,7 @@ def should_model_swing_contact(
 def run_single_support_control(
     robot,
     phase_state: PhaseState,
+    ss_state: SingleSupportState,
     t: float,
     step: int,
     state: CentroidalState,
@@ -177,7 +180,7 @@ def run_single_support_control(
     if step % solvers.wbc_period == 0:
         M = robot.compute_mass_matrix(state.q)
         C = robot.compute_coriolis_gravity(state.q, state.v)
-        modeled_swing_contact = should_model_swing_contact(phase_state, load_shift_metrics)
+        modeled_swing_contact = should_model_swing_contact(phase_state.phase, load_shift_metrics)
         swing_metrics_pre = (
             robot.get_contact_metrics(support.swing_foot_link)
             if modeled_swing_contact
@@ -229,25 +232,25 @@ def run_single_support_control(
         support_metrics_pre = robot.get_contact_metrics(support.support_foot_link)
         if support_metrics_pre["normal_force"] > 1e-6:
             measured_cop_world = np.array(support_metrics_pre["cop_position"], copy=True)
-            phase_state.filtered_cop_world[:] = (
+            ss_state.filtered_cop_world[:] = (
                 direct_cfg.cop.filter_alpha * measured_cop_world
-                + (1.0 - direct_cfg.cop.filter_alpha) * phase_state.filtered_cop_world
+                + (1.0 - direct_cfg.cop.filter_alpha) * ss_state.filtered_cop_world
             )
             measured_support_position_world = np.array(support_metrics_pre["position"], copy=True)
-            phase_state.filtered_support_position_world[:] = (
+            ss_state.filtered_support_position_world[:] = (
                 direct_cfg.wrench.state_filter_alpha * measured_support_position_world
-                + (1.0 - direct_cfg.wrench.state_filter_alpha) * phase_state.filtered_support_position_world
+                + (1.0 - direct_cfg.wrench.state_filter_alpha) * ss_state.filtered_support_position_world
             )
 
         dt_wbc = solvers.wbc_period * DT_SIM
         measured_cop_velocity_world = (
-            phase_state.filtered_cop_world - phase_state.prev_filtered_cop_world
+            ss_state.filtered_cop_world - ss_state.prev_filtered_cop_world
         ) / dt_wbc
-        phase_state.prev_filtered_cop_world[:] = phase_state.filtered_cop_world
+        ss_state.prev_filtered_cop_world[:] = ss_state.filtered_cop_world
         measured_support_slip_velocity_world = (
-            phase_state.filtered_support_position_world - phase_state.prev_filtered_support_position_world
+            ss_state.filtered_support_position_world - ss_state.prev_filtered_support_position_world
         ) / dt_wbc
-        phase_state.prev_filtered_support_position_world[:] = phase_state.filtered_support_position_world
+        ss_state.prev_filtered_support_position_world[:] = ss_state.filtered_support_position_world
 
         nominal_cop_target_world = support.initial_contact
         cop_target_world = nominal_cop_target_world
@@ -257,11 +260,11 @@ def run_single_support_control(
                 foot_origin,
                 foot_rotation,
                 nominal_cop_target_world,
-                phase_state.filtered_cop_world,
+                ss_state.filtered_cop_world,
                 measured_cop_velocity_world,
             )
 
-        support_slip_world = phase_state.filtered_support_position_world - support.initial_contact
+        support_slip_world = ss_state.filtered_support_position_world - support.initial_contact
         desired_force_xy_world = -(
             direct_cfg.wrench.slip_force_kp * support_slip_world[:2]
             + direct_cfg.wrench.slip_force_kd * measured_support_slip_velocity_world[:2]
