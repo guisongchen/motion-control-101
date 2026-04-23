@@ -16,9 +16,7 @@ MU = 0.8                      # 地面摩擦系数
 # 机器人模型参数
 # ---------------------------------------------------------------------------
 MODEL_PATH = "/home/ccc/projects/unitree_ros/robots/g1_description/g1_23dof.xml"
-INITIAL_POSE = "standing"     # 初始姿势：双脚站立
 LIFT_LEG = "left"             # t=0.5s 抬起的腿
-LIFT_TIME = 0.5               # 抬腿时刻 [s]
 H_COM = 0.8                   # 期望 CoM 高度 [m]（相对于支撑足）
 
 # 候选足端 link 名称（动态检测哪个在接触）
@@ -97,7 +95,6 @@ SINGLE_SUPPORT_ESTABLISH_COM_SPEED = 0.35
 SINGLE_SUPPORT_POSE_BLEND_TIME = 0.60
 SINGLE_SUPPORT_MIN_FORCE_RATIO = 0.90
 SINGLE_SUPPORT_HOLD_FORCE = 15.0
-SINGLE_SUPPORT_PRE_ESTABLISH_TAU_BLEND = 0.70
 SINGLE_SUPPORT_MAX_TAU_BLEND = 0.85
 SINGLE_SUPPORT_MAX_HORIZONTAL_FORCE = 20.0
 SINGLE_SUPPORT_SUPPORT_HIP_PITCH_DELTA = 0.0
