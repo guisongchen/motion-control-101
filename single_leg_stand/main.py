@@ -225,8 +225,19 @@ def main() -> None:
     c_ddot_ref = np.zeros(3)
     L_dot_ref = np.zeros(3)
 
-    wbc_period = max(1, int(1.0 / (WBC_FREQ * DT_SIM)))
-    mpc_period = max(1, int(1.0 / (MPC_FREQ * DT_SIM)))
+    physics_freq = 1.0 / DT_SIM
+    if WBC_FREQ > physics_freq:
+        raise ValueError(
+            f"WBC_FREQ ({WBC_FREQ} Hz) exceeds physics rate ({physics_freq:.0f} Hz). "
+            f"Lower WBC_FREQ or reduce DT_SIM."
+        )
+    if MPC_FREQ > physics_freq:
+        raise ValueError(
+            f"MPC_FREQ ({MPC_FREQ} Hz) exceeds physics rate ({physics_freq:.0f} Hz). "
+            f"Lower MPC_FREQ or reduce DT_SIM."
+        )
+    wbc_period = max(1, round(physics_freq / WBC_FREQ))
+    mpc_period = max(1, round(physics_freq / MPC_FREQ))
     total_steps = int(SIM_DURATION / DT_SIM)
 
     time_log = []
@@ -249,7 +260,7 @@ def main() -> None:
         locked_support_foot_link=preferred_support_foot_link,
         filtered_support_point=initial_foot_pos[preferred_support_foot_link].copy(),
         last_valid_support_tau=None,
-        last_wbc_warn_step=-10_000,
+        last_wbc_warn_time=-1e9,
         single_support_com_ref=None,
         single_support_joint_ref=None,
         single_support_ready_since=None,
@@ -515,7 +526,7 @@ def main() -> None:
 
                 if (
                     wbc_result is None or support_force < hold_force_threshold
-                ) and step - phase_state.last_wbc_warn_step >= 60:
+                ) and t - phase_state.last_wbc_warn_time >= 0.25:
                     if J_c is not None and J_c.shape[0] % 6 == 0:
                         J_c_lin = np.vstack(
                             [J_c[6 * i : 6 * i + 3, :] for i in range(J_c.shape[0] // 6)]
@@ -537,7 +548,7 @@ def main() -> None:
                         f"rank(Jc)={np.linalg.matrix_rank(J_c_lin)}, "
                         f"cond(JcJc^T)={J_c_cond:.2e}, f_ref={format_vector(f_ref)}"
                     )
-                    phase_state.last_wbc_warn_step = step
+                    phase_state.last_wbc_warn_time = t
 
                 applied_tau = tau_cmd.copy()
                 robot.set_joint_torques(applied_tau)

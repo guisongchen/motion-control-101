@@ -239,13 +239,14 @@ def run_single_support_control(
                 + (1.0 - direct_cfg.wrench.state_filter_alpha) * phase_state.filtered_support_position_world
             )
 
+        dt_wbc = solvers.wbc_period * DT_SIM
         measured_cop_velocity_world = (
             phase_state.filtered_cop_world - phase_state.prev_filtered_cop_world
-        ) / DT_SIM
+        ) / dt_wbc
         phase_state.prev_filtered_cop_world[:] = phase_state.filtered_cop_world
         measured_support_slip_velocity_world = (
             phase_state.filtered_support_position_world - phase_state.prev_filtered_support_position_world
-        ) / DT_SIM
+        ) / dt_wbc
         phase_state.prev_filtered_support_position_world[:] = phase_state.filtered_support_position_world
 
         nominal_cop_target_world = support.initial_contact

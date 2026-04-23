@@ -5,8 +5,8 @@ import numpy as np
 # ---------------------------------------------------------------------------
 # 仿真环境参数
 # ---------------------------------------------------------------------------
-DT_SIM = 1.0 / 240.0          # Simulation step [s]
-WBC_FREQ = 1000               # WBC 控制频率 [Hz]
+DT_SIM = 0.001                # Simulation step [s]
+WBC_FREQ = 250                # WBC 控制频率 [Hz] (effective rate with DT_SIM=0.001)
 MPC_FREQ = 20                 # MPC 重求解频率 [Hz] (= 50 ms 周期)
 SIM_DURATION = 4.0            # 总仿真时长 [s]
 GRAVITY = np.array([0.0, 0.0, -9.81])

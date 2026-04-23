@@ -32,12 +32,12 @@ class PhaseState:
     locked_support_foot_link: int
     filtered_support_point: np.ndarray
     last_valid_support_tau: Optional[np.ndarray]
-    last_wbc_warn_step: int
     single_support_com_ref: Optional[np.ndarray]
     single_support_joint_ref: Optional[np.ndarray]
     single_support_ready_since: Optional[float]
     single_support_established: bool
     # Filter state for single-support CoP / support-position feedback
+    last_wbc_warn_time: float = -1e9
     filtered_cop_world: Optional[np.ndarray] = None
     prev_filtered_cop_world: Optional[np.ndarray] = None
     filtered_support_position_world: Optional[np.ndarray] = None
