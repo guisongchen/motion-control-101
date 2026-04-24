@@ -39,6 +39,7 @@ def check_pre_liftoff_transition(
     candidate_foot_links: list[int],
     joint_positions: np.ndarray,
     initial_foot_pos: dict[int, np.ndarray],
+    foot_name_map: dict[int, str],
 ) -> Optional[str]:
     """Transition to SINGLE_SUPPORT when pre-liftoff readiness is achieved."""
     elapsed = phase_elapsed(phase_state, t)
@@ -74,7 +75,7 @@ def check_pre_liftoff_transition(
             from phase_core import support_name
             return (
                 "single-support control "
-                f"(support={support_name(candidate_foot_links, phase_state.locked_support_foot_link)}, "
+                f"(support={support_name(foot_name_map, phase_state.locked_support_foot_link)}, "
                 f"support_ratio={load_shift_metrics.support_ratio:.2f}, "
                 f"swing_force={load_shift_metrics.swing_force:.1f}N, "
                 f"forward_error={forward_error:.3f}m, "

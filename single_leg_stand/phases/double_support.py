@@ -47,6 +47,7 @@ def check_double_support_transition(
     preferred_support_foot_link: int,
     c_dot: np.ndarray,
     L: np.ndarray,
+    foot_name_map: dict[int, str],
 ) -> Optional[str]:
     """Transition to LOAD_SHIFT when both feet are stable and loaded."""
     double_support_forces = [
@@ -87,7 +88,7 @@ def check_double_support_transition(
             from phase_core import support_name
             return (
                 "load shift "
-                f"(support={support_name(candidate_foot_links, phase_state.locked_support_foot_link)})"
+                f"(support={support_name(foot_name_map, phase_state.locked_support_foot_link)})"
             )
     else:
         phase_state.ready_since = None

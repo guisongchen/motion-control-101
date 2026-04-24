@@ -141,11 +141,9 @@ def get_contact_entry(foot_contacts: list[dict], link: int) -> Optional[dict]:
     return next((fc for fc in foot_contacts if fc["link"] == link), None)
 
 
-def support_name(candidate_foot_links: list[int], link: int) -> str:
+def support_name(foot_name_map: dict[int, str], link: int) -> str:
     """Map support link index back to the configured foot name."""
-    from config import FOOT_LINK_NAMES
-
-    return FOOT_LINK_NAMES[candidate_foot_links.index(link)]
+    return foot_name_map.get(link, str(link))
 
 
 def transition_phase(phase_state: PhaseState, new_phase: ControlPhase, t: float) -> None:

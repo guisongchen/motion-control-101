@@ -166,13 +166,3 @@ def compute_pd_torque(
     return np.clip(tau, -tau_limit, tau_limit)
 
 
-def get_leg_joint_names(side: str) -> list[str]:
-    """Return the 6 actuated joints of one leg."""
-    return [
-        f"{side}_hip_pitch_joint",
-        f"{side}_hip_roll_joint",
-        f"{side}_hip_yaw_joint",
-        f"{side}_knee_joint",
-        f"{side}_ankle_pitch_joint",
-        f"{side}_ankle_roll_joint",
-    ]

@@ -15,52 +15,7 @@ MU = 0.8                      # 地面摩擦系数
 # ---------------------------------------------------------------------------
 # 机器人模型参数
 # ---------------------------------------------------------------------------
-MODEL_PATH = "/home/ccc/projects/unitree_ros/robots/g1_description/g1_23dof.xml"
-LIFT_LEG = "left"             # t=0.5s 抬起的腿
 H_COM = 0.8                   # 期望 CoM 高度 [m]（相对于支撑足）
-
-# 候选足端 link 名称（动态检测哪个在接触）
-FOOT_LINK_NAMES = [
-    "left_ankle_roll_link",
-    "right_ankle_roll_link",
-]
-SUPPORT_FOOT_NAME = "right_ankle_roll_link" if LIFT_LEG == "left" else "left_ankle_roll_link"
-
-# 初始站立姿态（弧度）
-# MuJoCo 下零位姿态会让双足站立非常脆弱；使用轻微屈膝姿态作为默认站立姿态。
-STANDING_JOINT_ANGLES = {
-    # 左腿
-    "left_hip_pitch_joint": -0.2,
-    "left_hip_roll_joint": 0.0,
-    "left_hip_yaw_joint": 0.0,
-    "left_knee_joint": 0.4,
-    "left_ankle_pitch_joint": -0.2,
-    "left_ankle_roll_joint": 0.0,
-    # 右腿
-    "right_hip_pitch_joint": -0.2,
-    "right_hip_roll_joint": 0.0,
-    "right_hip_yaw_joint": 0.0,
-    "right_knee_joint": 0.4,
-    "right_ankle_pitch_joint": -0.2,
-    "right_ankle_roll_joint": 0.0,
-    # 躯干
-    "waist_yaw_joint": 0.0,
-    # 手臂（自然下垂）
-    "left_shoulder_pitch_joint": 0.0,
-    "left_shoulder_roll_joint": 0.0,
-    "left_shoulder_yaw_joint": 0.0,
-    "left_elbow_joint": 0.0,
-    "left_wrist_roll_joint": 0.0,
-    "right_shoulder_pitch_joint": 0.0,
-    "right_shoulder_roll_joint": 0.0,
-    "right_shoulder_yaw_joint": 0.0,
-    "right_elbow_joint": 0.0,
-    "right_wrist_roll_joint": 0.0,
-}
-
-# 基座初始位姿
-BASE_INITIAL_POS = np.array([0.0, 0.0, 0.76])       # 轻微屈膝站姿下的稳定双脚落地高度
-BASE_INITIAL_ORN = np.array([0.0, 0.0, 0.0, 1.0])   # [qx, qy, qz, qw]
 
 # ---------------------------------------------------------------------------
 # Actuator layer

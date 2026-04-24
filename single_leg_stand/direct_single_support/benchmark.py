@@ -20,8 +20,9 @@ from direct_single_support.primitives import (
     yaw_from_rotation,
 )
 import wbc as wbc_module
-from utils import compute_pd_torque, get_leg_joint_names
+from utils import compute_pd_torque
 from robot_model import RobotModel
+from robots.unitree_g1 import g1_config
 from state_estimator import StateEstimator
 from wbc import WholeBodyController
 
@@ -110,7 +111,7 @@ def run_direct_single_support(
 
     swing_leg_dof_indices = [
         robot.dof_joint_name_to_index[name]
-        for name in get_leg_joint_names(swing_leg)
+        for name in g1_config.leg_joint_names[swing_leg]
         if name in robot.dof_joint_name_to_index
     ]
 

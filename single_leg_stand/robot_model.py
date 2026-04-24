@@ -1,10 +1,25 @@
 """MuJoCo robot model wrapper for kinematics, dynamics, and contact queries."""
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 import mujoco
 import numpy as np
+
+
+@dataclass
+class RobotConfig:
+    """Robot-specific kinematic and geometric description."""
+
+    model_path: str
+    root_body_name: str
+    foot_link_names: list[str]
+    standing_joint_angles: dict[str, float]
+    base_initial_pos: np.ndarray
+    base_initial_orn: np.ndarray
+    lift_leg: str
+    leg_joint_names: dict[str, list[str]]
 
 
 def _quat_xyzw_to_wxyz(quat_xyzw: np.ndarray) -> np.ndarray:
@@ -24,25 +39,22 @@ class RobotModel:
 
     def __init__(
         self,
-        model_path: str,
-        base_position: Optional[np.ndarray] = None,
-        base_orientation: Optional[np.ndarray] = None,
+        config: RobotConfig,
         use_fixed_base: bool = False,
     ):
         if use_fixed_base:
-            raise ValueError("MuJoCo G1 model is configured with a floating base only.")
+            raise ValueError("MuJoCo model is configured with a floating base only.")
 
-        self.model_path = str(Path(model_path).expanduser())
+        self.config = config
+        self.model_path = str(Path(config.model_path).expanduser())
         self.model = mujoco.MjModel.from_xml_path(self.model_path)
         self.data = mujoco.MjData(self.model)
 
-        if base_position is None:
-            base_position = np.array([0.0, 0.0, 1.0])
-        if base_orientation is None:
-            base_orientation = np.array([0.0, 0.0, 0.0, 1.0])
+        base_position = np.asarray(config.base_initial_pos, dtype=float)
+        base_orientation = np.asarray(config.base_initial_orn, dtype=float)
 
         self.root_body_id = mujoco.mj_name2id(
-            self.model, mujoco.mjtObj.mjOBJ_BODY, "pelvis"
+            self.model, mujoco.mjtObj.mjOBJ_BODY, config.root_body_name
         )
         self.link_name_to_index = {
             mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_BODY, body_id): body_id

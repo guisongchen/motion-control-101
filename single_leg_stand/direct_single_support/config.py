@@ -5,19 +5,20 @@ from dataclasses import dataclass, field
 import numpy as np
 
 import config
+from robots.unitree_g1 import g1_config
 
 
 @dataclass(frozen=True)
 class DirectSingleSupportEnvConfig:
-    model_path: str = config.MODEL_PATH
+    model_path: str = g1_config.model_path
     gravity: np.ndarray = field(default_factory=lambda: np.array(config.GRAVITY, copy=True))
     dt: float = config.DT_SIM
     base_damping: float = config.BASE_DOF_DAMPING
     joint_damping: float = config.JOINT_DOF_DAMPING
-    foot_link_names: tuple[str, ...] = field(default_factory=lambda: tuple(config.FOOT_LINK_NAMES))
-    support_foot_name: str = config.SUPPORT_FOOT_NAME
+    foot_link_names: tuple[str, ...] = field(default_factory=lambda: tuple(g1_config.foot_link_names))
+    support_foot_name: str = "right_ankle_roll_link" if g1_config.lift_leg == "left" else "left_ankle_roll_link"
     standing_joint_angles: dict[str, float] = field(
-        default_factory=lambda: dict(config.STANDING_JOINT_ANGLES)
+        default_factory=lambda: dict(g1_config.standing_joint_angles)
     )
 
 
