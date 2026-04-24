@@ -181,7 +181,6 @@ def main() -> None:
     ]
 
     mpc = CentroidalMPC()
-    wbc = WholeBodyController(robot.nv)
     wbc_ss = WholeBodyController(robot.nv, num_contacts=4)
     wbc_ss_with_swing = WholeBodyController(robot.nv, num_contacts=5)
 
@@ -192,13 +191,10 @@ def main() -> None:
     with open(optimized_pose_path, "r") as f:
         opt_data = json.load(f)
     optimized_joint_angles = np.array(opt_data["joint_angles"], dtype=float)
-    optimized_base_pos = np.array(opt_data["base_position"], dtype=float)
-    optimized_base_orn = np.array(opt_data["base_orientation"], dtype=float)
 
     # Pre-parse corner-patch contact points for the preferred support foot
     initial_support_metrics = robot.get_contact_metrics(preferred_support_foot_link)
     initial_support_contact = initial_support_metrics["position"].copy()
-    initial_support_body = robot.get_link_com_position(preferred_support_foot_link).copy()
     support_contact_local_positions = resolve_support_contact_local_positions(
         robot, preferred_support_foot_link, initial_support_contact
     )
@@ -327,7 +323,6 @@ def main() -> None:
                 # Re-initialize corner-patch contact state from current pose
                 support_metrics_now = robot.get_contact_metrics(support_foot_link)
                 initial_support_contact = support_metrics_now["position"].copy()
-                initial_support_body = robot.get_link_com_position(support_foot_link).copy()
                 ss_state.filtered_cop_world = np.array(support_metrics_now["cop_position"], copy=True)
                 ss_state.prev_filtered_cop_world = ss_state.filtered_cop_world.copy()
                 ss_state.filtered_support_position_world = np.array(support_metrics_now["position"], copy=True)
