@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
 import numpy as np
 
 from config import (
@@ -55,7 +52,6 @@ from phase_core import (
     support_name,
     format_vector,
     compute_phase_com_target,
-    world_point_to_local_body_point,
 )
 from phase_metrics import compute_load_shift_metrics
 from phase_targets import (
@@ -232,8 +228,6 @@ def main() -> None:
                 next_phase = ControlPhase.DOUBLE_SUPPORT_HOLD
         elif phase == ControlPhase.DOUBLE_SUPPORT_HOLD:
             next_phase = check_double_support_transition(
-                phase,
-                phase_start_time,
                 t,
                 double_support_gate,
                 foot_contacts,
@@ -244,11 +238,10 @@ def main() -> None:
             )
         elif phase == ControlPhase.LOAD_SHIFT:
             next_phase = check_load_shift_transition(
-                phase, phase_start_time, t, load_shift_gate, load_shift_metrics
+                phase_start_time, t, load_shift_gate, load_shift_metrics
             )
         elif phase == ControlPhase.PRE_LIFTOFF:
             next_phase = check_pre_liftoff_transition(
-                phase,
                 phase_start_time,
                 ss_state,
                 t,
@@ -509,8 +502,10 @@ def main() -> None:
 
         if mpc_result is not None:
             mpc_f_ref_log.append(f_ref.copy())
+            mpc_time_log.append(mpc_result.get("solve_time", 0.0))
         else:
             mpc_f_ref_log.append(np.zeros(3))
+            mpc_time_log.append(0.0)
 
         if (step + 1) % 240 == 0:
             print(f"\n--- t={t:.3f}s [{phase.name}] ---")

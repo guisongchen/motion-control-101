@@ -26,7 +26,6 @@ from phase_metrics import LoadShiftMetrics
 
 
 def check_pre_liftoff_transition(
-    phase: ControlPhase,
     phase_start_time: float,
     ss_state: SingleSupportState,
     t: float,

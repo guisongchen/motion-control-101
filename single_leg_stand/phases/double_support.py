@@ -19,8 +19,6 @@ from phase_core import ControlPhase, StabilityGate, get_contact_entry
 
 
 def check_double_support_transition(
-    phase: ControlPhase,
-    phase_start_time: float,
     t: float,
     gate: StabilityGate,
     foot_contacts: list[dict],

@@ -18,7 +18,6 @@ from phase_metrics import LoadShiftMetrics
 
 
 def check_load_shift_transition(
-    phase: ControlPhase,
     phase_start_time: float,
     t: float,
     gate: StabilityGate,
