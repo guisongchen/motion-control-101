@@ -22,6 +22,7 @@ from phase_core import (
     SingleSupportState,
     compute_forward_handoff_metrics,
 )
+from robot_model import RobotModel
 
 _pre_liftoff_gate = StabilityGate()
 
@@ -36,6 +37,7 @@ def check_pre_liftoff_transition(
     joint_positions: np.ndarray,
     initial_foot_pos: dict[int, np.ndarray],
     locked_support_foot_link: int,
+    robot: RobotModel,
 ) -> Optional[ControlPhase]:
     """Transition to SINGLE_SUPPORT when pre-liftoff readiness is achieved."""
     c = state["c"]
@@ -59,10 +61,8 @@ def check_pre_liftoff_transition(
     if _pre_liftoff_gate.check(pre_liftoff_ready, t, PRE_LIFTOFF_READY_TIME):
         from phases.single_support import build_single_support_com_ref
         ss_state.com_ref = build_single_support_com_ref(
-            c,
-            initial_foot_pos,
+            robot,
             locked_support_foot_link,
-            swing_foot_link,
         )
         ss_state.joint_ref = joint_positions.copy()
         ss_state.ready_since = None

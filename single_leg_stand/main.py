@@ -237,6 +237,7 @@ def main() -> None:
                 q[nq_base:],
                 initial_foot_pos,
                 locked_support_foot_link,
+                robot,
             )
 
         if next_phase is not None:

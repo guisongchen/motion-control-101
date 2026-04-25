@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
+import mujoco
 import numpy as np
 
 from config import (
     DT_SIM,
+    H_COM,
     MIN_SUPPORT_FORCE,
     SINGLE_SUPPORT_ESTABLISH_SUPPORT_RATIO,
     SINGLE_SUPPORT_ESTABLISH_SWING_FORCE_MAX,
     SINGLE_SUPPORT_ESTABLISH_COM_SPEED,
     SLIP_THRESH,
-    SINGLE_SUPPORT_COM_RATIO,
     SINGLE_SUPPORT_HOLD_FORCE,
     SINGLE_SUPPORT_MPC_DELAY,
     SINGLE_SUPPORT_FORCE_BLEND_TIME,
@@ -32,33 +33,34 @@ from phase_core import (
     ControlMemory,
 )
 from phase_metrics import LoadShiftMetrics
+from robot_model import RobotModel
 
 
 def build_single_support_com_ref(
-    c: np.ndarray,
-    initial_foot_pos: dict[int, np.ndarray],
+    robot: RobotModel,
     support_foot_link: int,
-    swing_foot_link: int,
 ) -> np.ndarray:
-    """Anchor the single-support CoM target to the stable handoff state."""
-    c_ref = c.copy()
-    support_xy = initial_foot_pos[support_foot_link][:2]
-    swing_xy = initial_foot_pos[swing_foot_link][:2]
-    stance_midpoint = 0.5 * (support_xy + swing_xy)
-    target_xy = stance_midpoint + SINGLE_SUPPORT_COM_RATIO * (support_xy - stance_midpoint)
+    """Anchor the single-support CoM target to the contact-patch centroid."""
+    body_origin = np.array(robot.data.xpos[support_foot_link], copy=True)
+    body_rotation = np.array(robot.data.xmat[support_foot_link]).reshape(3, 3)
 
-    support_axis = support_xy - swing_xy
-    support_axis_norm = np.linalg.norm(support_axis)
-    if support_axis_norm > 1e-6:
-        support_axis /= support_axis_norm
-        current_projection = np.dot(c[:2] - stance_midpoint, support_axis)
-        target_projection = np.dot(target_xy - stance_midpoint, support_axis)
-        if current_projection < target_projection:
-            c_ref[:2] += (target_projection - current_projection) * support_axis
-        perp_axis = np.array([-support_axis[1], support_axis[0]])
-        perp_error = np.dot(c[:2] - stance_midpoint, perp_axis)
-        c_ref[:2] -= 0.5 * perp_error * perp_axis
-    c_ref[2] = c[2]
+    corners: list[np.ndarray] = []
+    for geom_id in range(robot.model.ngeom):
+        if int(robot.model.geom_bodyid[geom_id]) != support_foot_link:
+            continue
+        if int(robot.model.geom_type[geom_id]) != mujoco.mjtGeom.mjGEOM_SPHERE:
+            continue
+        local_pos = np.array(robot.model.geom_pos[geom_id], copy=True)
+        world_pos = body_origin + body_rotation @ local_pos
+        corners.append(world_pos)
+
+    c_ref = np.zeros(3)
+    if corners:
+        centroid = np.mean(corners, axis=0)
+        c_ref[:2] = centroid[:2]
+    else:
+        c_ref[:2] = body_origin[:2]
+    c_ref[2] = H_COM
     return c_ref
 
 
