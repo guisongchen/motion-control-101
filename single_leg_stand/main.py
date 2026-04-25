@@ -493,32 +493,6 @@ def main() -> None:
             mpc_f_ref_log.append(np.zeros(3))
             mpc_time_log.append(0.0)
 
-        if (step + 1) % 240 == 0:
-            print(f"\n--- t={t:.3f}s [{phase.name}] ---")
-            print(
-                f"  CoM: [{c[0]:.3f}, {c[1]:.3f}, {c[2]:.3f}]  "
-                f"(ref [{c_ref[0]:.3f}, {c_ref[1]:.3f}, {c_ref[2]:.2f}])"
-            )
-            mpc_t = mpc_time_log[-1] * 1000 if mpc_time_log else 0.0
-            wbc_t = wbc_time_log[-1] * 1000 if wbc_time_log else 0.0
-            print(f"  MPC solve: {mpc_t:.2f} ms | WBC solve: {wbc_t:.2f} ms")
-            print(
-                f"  Load shift: support_ratio={load_shift_metrics.support_ratio:.2f}  "
-                f"com_shift={load_shift_metrics.com_shift_ratio:.2f}  "
-                f"swing_force={load_shift_metrics.swing_force:.1f}N  "
-                f"com_speed={load_shift_metrics.com_speed:.3f}m/s  "
-                f"forward_error={c[0] - c_ref[0]:.3f}m  "
-                f"forward_vel={c_dot[0]:.3f}m/s  "
-                f"swing_slip={load_shift_metrics.swing_slip*1000:.2f}mm  "
-                f"unload={compute_swing_unload_factor(phase, phase_start_time, t, load_shift_metrics):.2f}  "
-                f"entry={entry_progress:.2f}  "
-                f"established={int(ss_state.established)}"
-            )
-            for fc in foot_contacts:
-                link_name = support_name(robot.link_to_foot_name, fc["link"])
-                slip = np.linalg.norm(fc["position"][:2] - initial_foot_pos[fc["link"]][:2])
-                print(f"  {link_name}: force={fc['normal_force']:.1f}N  slip={slip*1000:.2f}mm")
-
     rmse = compute_rmse(com_log, com_ref_log)
     print(f"\n{'='*50}")
     print("===== 实验结果 =====")
