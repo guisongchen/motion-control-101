@@ -198,9 +198,12 @@ def main() -> None:
     print(f"WBC 周期: {wbc_period} 步 ({wbc_period * DT_SIM * 1000:.3f} ms)")
     print("=" * 50)
 
+    # Base DOF offsets (free joint: 7 qpos, 6 vel for standard humanoids)
+    nq_base = robot.model.jnt_qposadr[1] if robot.model.njnt > 1 else robot.model.nq
+    nv_base = robot.model.jnt_dofadr[1] if robot.model.njnt > 1 else robot.model.nv
+
     for step in range(total_steps):
         t = step * DT_SIM
-        use_wbc = phase == ControlPhase.SINGLE_SUPPORT
         lock_support = phase in (
             ControlPhase.LOAD_SHIFT,
             ControlPhase.PRE_LIFTOFF,
@@ -255,7 +258,7 @@ def main() -> None:
                 c_dot,
                 c_ref,
                 swing_foot_link,
-                q[7:],
+                q[nq_base:],
                 initial_foot_pos,
                 locked_support_foot_link,
             )
@@ -371,8 +374,8 @@ def main() -> None:
             f_ref = u_ref.copy()
             mpc_force_target = u_ref.copy()
 
-        joint_positions = q[7:]
-        joint_velocities = v[6:]
+        joint_positions = q[nq_base:]
+        joint_velocities = v[nv_base:]
         C_safe = robot.compute_coriolis_gravity(q, v)
         safe_targets = build_safe_targets(
             initial_dof_angles,
