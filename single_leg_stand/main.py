@@ -274,7 +274,6 @@ def main() -> None:
             ControlPhase.PRE_LIFTOFF,
             ControlPhase.SINGLE_SUPPORT,
         )
-        use_wbc = phase == ControlPhase.SINGLE_SUPPORT
         if lock_support:
             support_foot_link = locked_support_foot_link
             support_contact = get_contact_entry(foot_contacts, support_foot_link)
@@ -306,7 +305,7 @@ def main() -> None:
         J_c = None
         active_wbc_solver = wbc_ss
         entry_progress = compute_single_support_entry_progress(phase, phase_start_time, t)
-        if use_wbc:
+        if phase == ControlPhase.SINGLE_SUPPORT:
             f_ref, mpc_force_target, wbc_result, active_wbc_solver, J_c, mpc_result = (
                 run_single_support_control(
                     robot,
@@ -385,7 +384,7 @@ def main() -> None:
             load_shift_metrics,
         )
 
-        if not use_wbc:
+        if phase != ControlPhase.SINGLE_SUPPORT:
             applied_tau = safe_tau.copy()
             robot.set_joint_torques(applied_tau)
         else:
