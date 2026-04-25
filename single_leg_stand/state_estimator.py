@@ -15,10 +15,15 @@ class StateEstimator:
         """
         self.robot = robot
         self.candidate_foot_links = robot.foot_link_ids
+        self._preferred_support_foot_link = robot.foot_name_to_link[
+            robot.config.support_foot_name
+        ]
 
-    def update(self,
-               preferred_support_foot_link: int | None = None,
-               lock_support: bool = False) -> dict:
+    def update(
+        self,
+        preferred_support_foot_link: int | None = None,
+        lock_support: bool = False,
+    ) -> dict:
         """
         读取当前仿真状态并计算所有 MPC/WBC 输入量。
 
@@ -56,8 +61,12 @@ class StateEstimator:
                 max_force = normal_force
                 support_foot_link = link
 
-        if lock_support and preferred_support_foot_link is not None:
-            support_foot_link = preferred_support_foot_link
+        if lock_support:
+            support_foot_link = (
+                preferred_support_foot_link
+                if preferred_support_foot_link is not None
+                else self._preferred_support_foot_link
+            )
 
         # 回退：若都没有接触，取第一个候选足端（避免 None 导致后续崩溃）
         if support_foot_link is None and self.candidate_foot_links:

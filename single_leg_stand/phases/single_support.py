@@ -24,7 +24,7 @@ from config import (
 )
 from phase_core import (
     ControlPhase,
-    PhaseState,
+    PhaseTiming,
     SingleSupportState,
     phase_elapsed,
     compute_centroidal_dynamics,
@@ -112,7 +112,7 @@ def should_model_swing_contact(
 
 def run_single_support_control(
     robot,
-    phase_state: PhaseState,
+    phase_timing: PhaseTiming,
     ss_state: SingleSupportState,
     t: float,
     step: int,
@@ -136,7 +136,7 @@ def run_single_support_control(
         DIRECT_SINGLE_SUPPORT_CONFIG as direct_cfg,
     )
 
-    single_support_elapsed = phase_elapsed(phase_state, t)
+    single_support_elapsed = phase_elapsed(phase_timing, t)
 
     # Unpack grouped arguments for local convenience
     c = state.c
@@ -180,7 +180,7 @@ def run_single_support_control(
     if step % solvers.wbc_period == 0:
         M = robot.compute_mass_matrix(state.q)
         C = robot.compute_coriolis_gravity(state.q, state.v)
-        modeled_swing_contact = should_model_swing_contact(phase_state.phase, load_shift_metrics)
+        modeled_swing_contact = should_model_swing_contact(phase_timing.phase, load_shift_metrics)
         swing_metrics_pre = (
             robot.get_contact_metrics(support.swing_foot_link)
             if modeled_swing_contact

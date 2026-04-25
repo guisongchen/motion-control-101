@@ -18,7 +18,7 @@ from config import (
 )
 from phase_core import (
     ControlPhase,
-    PhaseState,
+    PhaseTiming,
     SingleSupportState,
     phase_elapsed,
     transition_phase,
@@ -28,7 +28,7 @@ from phase_metrics import LoadShiftMetrics
 
 
 def check_pre_liftoff_transition(
-    phase_state: PhaseState,
+    phase_timing: PhaseTiming,
     ss_state: SingleSupportState,
     t: float,
     load_shift_metrics: LoadShiftMetrics,
@@ -40,9 +40,10 @@ def check_pre_liftoff_transition(
     joint_positions: np.ndarray,
     initial_foot_pos: dict[int, np.ndarray],
     foot_name_map: dict[int, str],
+    locked_support_foot_link: int,
 ) -> Optional[str]:
     """Transition to SINGLE_SUPPORT when pre-liftoff readiness is achieved."""
-    elapsed = phase_elapsed(phase_state, t)
+    elapsed = phase_elapsed(phase_timing, t)
     forward_error, forward_velocity = compute_forward_handoff_metrics(c, c_dot, c_ref)
 
     pre_liftoff_ready = (
@@ -58,29 +59,29 @@ def check_pre_liftoff_transition(
         and load_shift_metrics.swing_slip <= SLIP_THRESH
     )
     if pre_liftoff_ready:
-        if phase_state.ready_since is None:
-            phase_state.ready_since = t
-        if t - phase_state.ready_since >= PRE_LIFTOFF_READY_TIME:
+        if phase_timing.ready_since is None:
+            phase_timing.ready_since = t
+        if t - phase_timing.ready_since >= PRE_LIFTOFF_READY_TIME:
             from phases.single_support import build_single_support_com_ref
             ss_state.com_ref = build_single_support_com_ref(
                 c,
                 initial_foot_pos,
-                phase_state.locked_support_foot_link,
+                locked_support_foot_link,
                 swing_foot_link,
             )
             ss_state.joint_ref = joint_positions.copy()
             ss_state.ready_since = None
             ss_state.established = False
-            transition_phase(phase_state, ControlPhase.SINGLE_SUPPORT, t)
+            transition_phase(phase_timing, ControlPhase.SINGLE_SUPPORT, t)
             from phase_core import support_name
             return (
                 "single-support control "
-                f"(support={support_name(foot_name_map, phase_state.locked_support_foot_link)}, "
+                f"(support={support_name(foot_name_map, locked_support_foot_link)}, "
                 f"support_ratio={load_shift_metrics.support_ratio:.2f}, "
                 f"swing_force={load_shift_metrics.swing_force:.1f}N, "
                 f"forward_error={forward_error:.3f}m, "
                 f"forward_vel={forward_velocity:.3f}m/s)"
             )
     else:
-        phase_state.ready_since = None
+        phase_timing.ready_since = None
     return None

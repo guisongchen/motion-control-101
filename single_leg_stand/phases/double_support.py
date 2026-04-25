@@ -17,29 +17,15 @@ from config import (
 )
 from phase_core import (
     ControlPhase,
-    PhaseState,
+    PhaseTiming,
     phase_elapsed,
     get_contact_entry,
     transition_phase,
 )
 
 
-def choose_support_foot(
-    foot_contacts: list[dict],
-    preferred_support_foot_link: int,
-) -> int:
-    """Choose the support foot deterministically, preferring the configured side."""
-    preferred_contact = get_contact_entry(foot_contacts, preferred_support_foot_link)
-    if (
-        preferred_contact is not None
-        and preferred_contact["normal_force"] >= MIN_SUPPORT_FORCE
-    ):
-        return preferred_support_foot_link
-    return max(foot_contacts, key=lambda fc: fc["normal_force"])["link"]
-
-
 def check_double_support_transition(
-    phase_state: PhaseState,
+    phase_timing: PhaseTiming,
     t: float,
     foot_contacts: list[dict],
     candidate_foot_links: list[int],
@@ -75,21 +61,15 @@ def check_double_support_transition(
         balanced = (min(double_support_forces) / total_force) >= DOUBLE_SUPPORT_FORCE_RATIO_MIN
 
     if both_feet_ready and stable_slip and com_vel_ok and momentum_ok and balanced:
-        if phase_state.ready_since is None:
-            phase_state.ready_since = t
-        if t - phase_state.ready_since >= DOUBLE_SUPPORT_READY_TIME:
-            phase_state.locked_support_foot_link = choose_support_foot(
-                foot_contacts, preferred_support_foot_link
-            )
-            phase_state.filtered_support_point = initial_foot_pos[
-                phase_state.locked_support_foot_link
-            ].copy()
-            transition_phase(phase_state, ControlPhase.LOAD_SHIFT, t)
+        if phase_timing.ready_since is None:
+            phase_timing.ready_since = t
+        if t - phase_timing.ready_since >= DOUBLE_SUPPORT_READY_TIME:
+            transition_phase(phase_timing, ControlPhase.LOAD_SHIFT, t)
             from phase_core import support_name
             return (
                 "load shift "
-                f"(support={support_name(foot_name_map, phase_state.locked_support_foot_link)})"
+                f"(support={support_name(foot_name_map, preferred_support_foot_link)})"
             )
     else:
-        phase_state.ready_since = None
+        phase_timing.ready_since = None
     return None

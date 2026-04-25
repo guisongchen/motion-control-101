@@ -23,14 +23,12 @@ class ControlPhase(Enum):
 
 
 @dataclass
-class PhaseState:
-    """Minimal temporal state for the high-level phase machine."""
+class PhaseTiming:
+    """Temporal state for the high-level phase machine."""
 
     phase: ControlPhase
     phase_start_time: float
-    ready_since: Optional[float]
-    locked_support_foot_link: int
-    filtered_support_point: np.ndarray
+    ready_since: Optional[float] = None
 
 
 @dataclass
@@ -146,16 +144,16 @@ def support_name(foot_name_map: dict[int, str], link: int) -> str:
     return foot_name_map.get(link, str(link))
 
 
-def transition_phase(phase_state: PhaseState, new_phase: ControlPhase, t: float) -> None:
+def transition_phase(phase_timing: PhaseTiming, new_phase: ControlPhase, t: float) -> None:
     """Switch phases and reset per-phase timers."""
-    phase_state.phase = new_phase
-    phase_state.phase_start_time = t
-    phase_state.ready_since = None
+    phase_timing.phase = new_phase
+    phase_timing.phase_start_time = t
+    phase_timing.ready_since = None
 
 
-def phase_elapsed(phase_state: PhaseState, t: float) -> float:
+def phase_elapsed(phase_timing: PhaseTiming, t: float) -> float:
     """Elapsed wall-clock simulation time inside the current phase."""
-    return t - phase_state.phase_start_time
+    return t - phase_timing.phase_start_time
 
 
 def world_point_to_local_body_point(
