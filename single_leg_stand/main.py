@@ -217,26 +217,21 @@ def main() -> None:
         elif phase == ControlPhase.DOUBLE_SUPPORT_HOLD:
             next_phase = check_double_support_transition(
                 t,
-                foot_contacts,
+                state,
                 candidate_foot_links,
                 initial_foot_pos,
-                c,
-                c_dot,
-                L,
                 robot,
             )
         elif phase == ControlPhase.LOAD_SHIFT:
             next_phase = check_load_shift_transition(
-                phase_start_time, t, load_shift_metrics
+                phase_start_time, t, state
             )
         elif phase == ControlPhase.PRE_LIFTOFF:
             next_phase = check_pre_liftoff_transition(
                 phase_start_time,
                 ss_state,
                 t,
-                load_shift_metrics,
-                c,
-                c_dot,
+                state,
                 c_ref,
                 swing_foot_link,
                 q[nq_base:],

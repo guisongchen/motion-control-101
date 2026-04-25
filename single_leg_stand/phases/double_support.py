@@ -40,15 +40,17 @@ def _foot_corners_world_xy(robot: RobotModel, link: int) -> list[np.ndarray]:
 
 def check_double_support_transition(
     t: float,
-    foot_contacts: list[dict],
+    state: dict,
     candidate_foot_links: list[int],
     initial_foot_pos: dict[int, np.ndarray],
-    c: np.ndarray,
-    c_dot: np.ndarray,
-    L: np.ndarray,
     robot: RobotModel,
 ) -> Optional[ControlPhase]:
     """Transition to LOAD_SHIFT when both feet are stable and loaded."""
+    c = state["c"]
+    c_dot = state["c_dot"]
+    L = state["L"]
+    foot_contacts = state["foot_contacts"]
+
     double_support_forces = [
         get_contact_entry(foot_contacts, link)["normal_force"]
         if get_contact_entry(foot_contacts, link) is not None

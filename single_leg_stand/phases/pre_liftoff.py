@@ -22,7 +22,6 @@ from phase_core import (
     SingleSupportState,
     compute_forward_handoff_metrics,
 )
-from phase_metrics import LoadShiftMetrics
 
 _pre_liftoff_gate = StabilityGate()
 
@@ -31,9 +30,7 @@ def check_pre_liftoff_transition(
     phase_start_time: float,
     ss_state: SingleSupportState,
     t: float,
-    load_shift_metrics: LoadShiftMetrics,
-    c: np.ndarray,
-    c_dot: np.ndarray,
+    state: dict,
     c_ref: np.ndarray,
     swing_foot_link: int,
     joint_positions: np.ndarray,
@@ -41,6 +38,9 @@ def check_pre_liftoff_transition(
     locked_support_foot_link: int,
 ) -> Optional[ControlPhase]:
     """Transition to SINGLE_SUPPORT when pre-liftoff readiness is achieved."""
+    c = state["c"]
+    c_dot = state["c_dot"]
+    load_shift_metrics = state["load_shift_metrics"]
     elapsed = t - phase_start_time
     forward_error, forward_velocity = compute_forward_handoff_metrics(c, c_dot, c_ref)
 

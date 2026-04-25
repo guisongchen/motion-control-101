@@ -14,7 +14,6 @@ from config import (
     LOAD_SHIFT_READY_TIME,
 )
 from phase_core import ControlPhase, StabilityGate
-from phase_metrics import LoadShiftMetrics
 
 _load_shift_gate = StabilityGate()
 
@@ -22,9 +21,10 @@ _load_shift_gate = StabilityGate()
 def check_load_shift_transition(
     phase_start_time: float,
     t: float,
-    load_shift_metrics: LoadShiftMetrics,
+    state: dict,
 ) -> Optional[ControlPhase]:
     """Transition to PRE_LIFTOFF when weight transfer metrics are satisfied."""
+    load_shift_metrics = state["load_shift_metrics"]
     elapsed = t - phase_start_time
     load_shift_ready = (
         elapsed >= LOAD_SHIFT_TIME
