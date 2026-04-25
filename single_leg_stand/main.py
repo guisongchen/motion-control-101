@@ -26,6 +26,8 @@ from config import (
     SINGLE_SUPPORT_MAX_TAU_BLEND,
     SUPPORT_POINT_FILTER,
     INIT_SETTLE_TIME,
+    LOAD_SHIFT_TIME,
+    PRE_LIFTOFF_TIME,
 )
 from robot_model import RobotModel
 from robots.unitree_g1 import g1_config
