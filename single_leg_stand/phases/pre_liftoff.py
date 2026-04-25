@@ -24,12 +24,13 @@ from phase_core import (
 )
 from phase_metrics import LoadShiftMetrics
 
+_pre_liftoff_gate = StabilityGate()
+
 
 def check_pre_liftoff_transition(
     phase_start_time: float,
     ss_state: SingleSupportState,
     t: float,
-    gate: StabilityGate,
     load_shift_metrics: LoadShiftMetrics,
     c: np.ndarray,
     c_dot: np.ndarray,
@@ -55,7 +56,7 @@ def check_pre_liftoff_transition(
         and load_shift_metrics.support_slip <= SLIP_THRESH
         and load_shift_metrics.swing_slip <= SLIP_THRESH
     )
-    if gate.check(pre_liftoff_ready, t, PRE_LIFTOFF_READY_TIME):
+    if _pre_liftoff_gate.check(pre_liftoff_ready, t, PRE_LIFTOFF_READY_TIME):
         from phases.single_support import build_single_support_com_ref
         ss_state.com_ref = build_single_support_com_ref(
             c,

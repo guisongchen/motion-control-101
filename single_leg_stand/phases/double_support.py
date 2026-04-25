@@ -16,10 +16,11 @@ from config import (
 )
 from phase_core import ControlPhase, StabilityGate, get_contact_entry
 
+_double_support_gate = StabilityGate()
+
 
 def check_double_support_transition(
     t: float,
-    gate: StabilityGate,
     foot_contacts: list[dict],
     candidate_foot_links: list[int],
     initial_foot_pos: dict[int, np.ndarray],
@@ -51,7 +52,7 @@ def check_double_support_transition(
     if total_force > 1e-6:
         balanced = (min(double_support_forces) / total_force) >= DOUBLE_SUPPORT_FORCE_RATIO_MIN
 
-    if gate.check(
+    if _double_support_gate.check(
         both_feet_ready and stable_slip and com_vel_ok and momentum_ok and balanced,
         t,
         DOUBLE_SUPPORT_READY_TIME,

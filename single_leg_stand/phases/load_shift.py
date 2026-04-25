@@ -16,11 +16,12 @@ from config import (
 from phase_core import ControlPhase, StabilityGate
 from phase_metrics import LoadShiftMetrics
 
+_load_shift_gate = StabilityGate()
+
 
 def check_load_shift_transition(
     phase_start_time: float,
     t: float,
-    gate: StabilityGate,
     load_shift_metrics: LoadShiftMetrics,
 ) -> Optional[ControlPhase]:
     """Transition to PRE_LIFTOFF when weight transfer metrics are satisfied."""
@@ -34,6 +35,6 @@ def check_load_shift_transition(
         and load_shift_metrics.support_slip <= SLIP_THRESH
         and load_shift_metrics.swing_slip <= SLIP_THRESH
     )
-    if gate.check(load_shift_ready, t, LOAD_SHIFT_READY_TIME):
+    if _load_shift_gate.check(load_shift_ready, t, LOAD_SHIFT_READY_TIME):
         return ControlPhase.PRE_LIFTOFF
     return None

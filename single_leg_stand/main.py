@@ -41,7 +41,6 @@ from utils import (
 
 from phase_core import (
     ControlPhase,
-    StabilityGate,
     SingleSupportState,
     CentroidalState,
     TaskReference,
@@ -170,9 +169,6 @@ def main() -> None:
     filtered_support_point = initial_foot_pos[preferred_support_foot_link].copy()
     phase = ControlPhase.INIT_SETTLE
     phase_start_time = 0.0
-    double_support_gate = StabilityGate()
-    load_shift_gate = StabilityGate()
-    pre_liftoff_gate = StabilityGate()
     ss_state = SingleSupportState(
         filtered_cop_world=np.array(initial_support_metrics["cop_position"], copy=True),
         prev_filtered_cop_world=np.array(initial_support_metrics["cop_position"], copy=True),
@@ -229,7 +225,6 @@ def main() -> None:
         elif phase == ControlPhase.DOUBLE_SUPPORT_HOLD:
             next_phase = check_double_support_transition(
                 t,
-                double_support_gate,
                 foot_contacts,
                 candidate_foot_links,
                 initial_foot_pos,
@@ -238,14 +233,13 @@ def main() -> None:
             )
         elif phase == ControlPhase.LOAD_SHIFT:
             next_phase = check_load_shift_transition(
-                phase_start_time, t, load_shift_gate, load_shift_metrics
+                phase_start_time, t, load_shift_metrics
             )
         elif phase == ControlPhase.PRE_LIFTOFF:
             next_phase = check_pre_liftoff_transition(
                 phase_start_time,
                 ss_state,
                 t,
-                pre_liftoff_gate,
                 load_shift_metrics,
                 c,
                 c_dot,
