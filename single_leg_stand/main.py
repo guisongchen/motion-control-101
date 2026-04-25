@@ -222,7 +222,7 @@ def main() -> None:
             initial_foot_pos,
         )
 
-        next_phase = None
+        next_phase = None  # None means hold current phase
         if phase == ControlPhase.INIT_SETTLE:
             if t - phase_start_time >= INIT_SETTLE_TIME:
                 next_phase = ControlPhase.DOUBLE_SUPPORT_HOLD
