@@ -32,6 +32,7 @@ from robots.unitree_g1 import g1_config
 from state_estimator import StateEstimator
 from mpc import CentroidalMPC
 from wbc import WholeBodyController
+from trajectory import compute_transition_com_trajectory, compute_foot_centroid_xy
 from utils import (
     compute_rmse,
     plot_com_tracking,
@@ -107,6 +108,7 @@ def main() -> None:
     mpc = CentroidalMPC()
     wbc_ss = WholeBodyController(robot.nv, num_contacts=4)
     wbc_ss_with_swing = WholeBodyController(robot.nv, num_contacts=5)
+    wbc_ds = WholeBodyController(robot.nv, num_contacts=2)
 
     # Pre-parse corner-patch contact points for the preferred support foot
     initial_support_metrics = robot.get_contact_metrics(preferred_support_foot_link)
@@ -182,6 +184,12 @@ def main() -> None:
     f_ref = u_ref.copy()
     mpc_force_target = u_ref.copy()
 
+    # Double-support to single-support trajectory state
+    ds_to_ss_start_xy: np.ndarray | None = None
+    ds_to_ss_end_xy: np.ndarray | None = None
+    ds_to_ss_transition_start_time: float | None = None
+    ds_to_ss_duration = LOAD_SHIFT_TIME + PRE_LIFTOFF_TIME
+
     print("\n===== 开始仿真（MuJoCo 单足站立测试模式）=====")
     print(f"总质量: {robot.total_mass:.2f} kg")
     print(f"仿真时长: {SIM_DURATION:.1f} s")
@@ -244,6 +252,14 @@ def main() -> None:
             phase = next_phase
             phase_start_time = t
             print(f"[INFO] t={t:.3f}s 进入阶段: {phase.name}")
+            if phase == ControlPhase.LOAD_SHIFT:
+                ds_to_ss_transition_start_time = t
+                foot_positions = [fc["position"] for fc in foot_contacts]
+                if foot_positions:
+                    ds_to_ss_start_xy = np.mean([p[:2] for p in foot_positions], axis=0)
+                else:
+                    ds_to_ss_start_xy = nominal_c_ref[:2].copy()
+                ds_to_ss_end_xy = compute_foot_centroid_xy(robot, locked_support_foot_link)
             if phase == ControlPhase.SINGLE_SUPPORT:
                 # Override WBC gains to proven direct-single-support values
                 wbc_module.Kp_c = direct_cfg.control.com_kp
@@ -294,6 +310,10 @@ def main() -> None:
                 nominal_c_ref[:2] = np.mean([p[:2] for p in foot_positions], axis=0)
 
         update_single_support_establishment(ss_state, phase, t, load_shift_metrics)
+
+        c_dot_ref = np.zeros(3)
+        c_ddot_ref = np.zeros(3)
+
         c_ref = compute_phase_com_target(
             nominal_c_ref,
             phase,
@@ -302,7 +322,19 @@ def main() -> None:
             locked_support_foot_link,
             swing_foot_link,
         )
+
+        if phase in (ControlPhase.LOAD_SHIFT, ControlPhase.PRE_LIFTOFF):
+            if ds_to_ss_transition_start_time is not None:
+                progress = (t - ds_to_ss_transition_start_time) / ds_to_ss_duration
+                c_ref, c_dot_ref, c_ddot_ref = compute_transition_com_trajectory(
+                    progress,
+                    ds_to_ss_start_xy,
+                    ds_to_ss_end_xy,
+                    ds_to_ss_duration,
+                )
+
         x_ref[:3] = c_ref
+        x_ref[3:6] = c_dot_ref
         mpc.set_reference(x_ref, u_ref)
 
         J_c = None
@@ -387,7 +419,51 @@ def main() -> None:
             load_shift_metrics,
         )
 
-        if phase != ControlPhase.SINGLE_SUPPORT:
+        if phase in (ControlPhase.LOAD_SHIFT, ControlPhase.PRE_LIFTOFF):
+            M = robot.compute_mass_matrix(q)
+            C = robot.compute_coriolis_gravity(q, v)
+            J_support = robot.get_foot_jacobian(locked_support_foot_link, q)
+            J_swing = robot.get_foot_jacobian(swing_foot_link, q)
+            J_c_ds = np.vstack([J_support, J_swing])
+            Jc_dot_ds = np.zeros_like(J_c_ds)
+            J_com = robot.get_com_jacobian(q)
+            J_L = robot.get_angular_momentum_jacobian(q)
+
+            c_ddot_des = wbc_ds.compute_desired_acceleration(
+                c_ref, c, c_dot_ref, c_dot, c_ddot_ref
+            )
+            L_dot_des = wbc_ds.compute_desired_momentum_rate(
+                L_ref, L, L_dot_ref, np.zeros(3)
+            )
+
+            total_weight = -GRAVITY[2] * robot.total_mass
+            f_ref_ds = np.array(
+                [0.0, 0.0, total_weight / 2.0, 0.0, 0.0, total_weight / 2.0]
+            )
+
+            wbc_ds_result = wbc_ds.solve(
+                M,
+                C,
+                J_c_ds,
+                Jc_dot_ds,
+                J_com,
+                J_L,
+                c_ddot_des,
+                L_dot_des,
+                f_ref_ds,
+                v,
+                tau_min_limits,
+                tau_max_limits,
+            )
+
+            if wbc_ds_result is not None:
+                applied_tau = wbc_ds_result["tau"]
+                wbc_result = wbc_ds_result
+                robot.set_joint_torques(applied_tau)
+            else:
+                applied_tau = safe_tau.copy()
+                robot.set_joint_torques(applied_tau)
+        elif phase != ControlPhase.SINGLE_SUPPORT:
             applied_tau = safe_tau.copy()
             robot.set_joint_torques(applied_tau)
         else:
