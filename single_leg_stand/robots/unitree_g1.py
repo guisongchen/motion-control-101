@@ -39,6 +39,8 @@ g1_config = RobotConfig(
     base_initial_pos=np.array([0.0, 0.0, 0.76]),
     base_initial_orn=np.array([0.0, 0.0, 0.0, 1.0]),
     lift_leg="left",
+    support_foot_name="right_ankle_roll_link",
+    swing_foot_name="left_ankle_roll_link",
     leg_joint_names={
         "left": [
             "left_hip_pitch_joint",

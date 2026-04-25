@@ -19,6 +19,8 @@ class RobotConfig:
     base_initial_pos: np.ndarray
     base_initial_orn: np.ndarray
     lift_leg: str
+    support_foot_name: str
+    swing_foot_name: str
     leg_joint_names: dict[str, list[str]]
 
 
@@ -97,6 +99,16 @@ class RobotModel:
                 f"Robot total mass must be positive, got {self._total_mass}. "
                 "Check MuJoCo inertial definitions."
             )
+
+        self.foot_link_ids = [
+            self.link_name_to_index[name] for name in config.foot_link_names
+        ]
+        self.foot_name_to_link = {
+            name: self.link_name_to_index[name] for name in config.foot_link_names
+        }
+        self.link_to_foot_name = {
+            idx: name for name, idx in self.foot_name_to_link.items()
+        }
 
         self.reset_base_pose(np.asarray(base_position, dtype=float), np.asarray(base_orientation, dtype=float))
 

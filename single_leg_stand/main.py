@@ -153,14 +153,11 @@ def main() -> None:
     robot.model.dof_damping[6:] = JOINT_DOF_DAMPING
     robot.reset_base_pose(g1_config.base_initial_pos, g1_config.base_initial_orn)
 
-    candidate_foot_links = [robot.link_name_to_index[name] for name in g1_config.foot_link_names]
-    foot_name_to_link = {name: robot.link_name_to_index[name] for name in g1_config.foot_link_names}
-    foot_name_map = {robot.link_name_to_index[name]: name for name in g1_config.foot_link_names}
-    support_foot_name = "right_ankle_roll_link" if g1_config.lift_leg == "left" else "left_ankle_roll_link"
-    preferred_support_foot_link = foot_name_to_link[support_foot_name]
+    candidate_foot_links = robot.foot_link_ids
+    preferred_support_foot_link = robot.foot_name_to_link[g1_config.support_foot_name]
+    swing_foot_link = robot.foot_name_to_link[g1_config.swing_foot_name]
     swing_leg = g1_config.lift_leg
     support_leg = "right" if swing_leg == "left" else "left"
-    swing_foot_link = foot_name_to_link[f"{swing_leg}_ankle_roll_link"]
     estimator = StateEstimator(robot, candidate_foot_links)
 
     initial_dof_angles = np.zeros(len(robot.dof_joints))
@@ -308,7 +305,7 @@ def main() -> None:
             candidate_foot_links,
             q[7:],
             c_ref,
-            foot_name_map,
+            robot.link_to_foot_name,
         )
         if transition_msg is not None:
             print(f"[INFO] t={t:.3f}s 进入阶段: {transition_msg}")
@@ -538,7 +535,7 @@ def main() -> None:
                 print(
                     f"[WARN] t={t:.3f}s using fallback support torque: {fallback_reason}, "
                     f"phase={phase_state.phase.name}, "
-                    f"support={support_name(foot_name_map, support_foot_link)}, "
+                    f"support={support_name(robot.link_to_foot_name, support_foot_link)}, "
                     f"force={support_force:.1f}N, alpha={effective_alpha:.2f}, "
                     f"rank(Jc)={np.linalg.matrix_rank(J_c_lin)}, "
                     f"cond(JcJc^T)={J_c_cond:.2e}, f_ref={format_vector(f_ref)}"
@@ -601,7 +598,7 @@ def main() -> None:
                 f"established={int(ss_state.established)}"
             )
             for fc in foot_contacts:
-                link_name = support_name(foot_name_map, fc["link"])
+                link_name = support_name(robot.link_to_foot_name, fc["link"])
                 slip = np.linalg.norm(fc["position"][:2] - initial_foot_pos[fc["link"]][:2])
                 print(f"  {link_name}: force={fc['normal_force']:.1f}N  slip={slip*1000:.2f}mm")
 
@@ -620,7 +617,7 @@ def main() -> None:
 
     for link in candidate_foot_links:
         forces = np.array(foot_force_log[link])
-        link_name = support_name(foot_name_map, link)
+        link_name = support_name(robot.link_to_foot_name, link)
         avg_force = np.mean(forces) if len(forces) > 0 else 0.0
         print(f"{link_name} 平均接触力: {avg_force:.1f} N")
 
