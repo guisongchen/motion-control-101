@@ -220,8 +220,10 @@ def main() -> None:
                 foot_contacts,
                 candidate_foot_links,
                 initial_foot_pos,
+                c,
                 c_dot,
                 L,
+                robot,
             )
         elif phase == ControlPhase.LOAD_SHIFT:
             next_phase = check_load_shift_transition(
