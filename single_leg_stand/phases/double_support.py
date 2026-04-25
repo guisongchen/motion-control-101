@@ -13,7 +13,6 @@ from config import (
     DOUBLE_SUPPORT_MAX_L_NORM,
     DOUBLE_SUPPORT_FORCE_RATIO_MIN,
     SLIP_THRESH,
-    MIN_SUPPORT_FORCE,
 )
 from phase_core import ControlPhase, StabilityGate, get_contact_entry
 

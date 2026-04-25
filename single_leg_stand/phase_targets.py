@@ -5,13 +5,10 @@ from __future__ import annotations
 import numpy as np
 
 from config import (
-    DT_SIM,
     POSTURE_KP,
     POSTURE_KD,
     LIFT_LEG_KP,
     LIFT_LEG_KD,
-    TRANSITION_BLEND_TIME,
-    SWING_RAMP_TIME,
     SINGLE_SUPPORT_SWING_RAMP_TIME,
     SINGLE_SUPPORT_SWING_PROGRESS_MAX,
     SWING_HIP_PITCH_TARGET,

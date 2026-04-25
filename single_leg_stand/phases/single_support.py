@@ -17,10 +17,8 @@ from config import (
     SINGLE_SUPPORT_FORCE_BLEND_TIME,
     SINGLE_SUPPORT_MIN_FORCE_RATIO,
     SINGLE_SUPPORT_MAX_HORIZONTAL_FORCE,
-    SINGLE_SUPPORT_ENTRY_TIME,
     SINGLE_SUPPORT_ESTABLISH_TIME,
     T_S,
-    GRAVITY,
 )
 from phase_core import (
     ControlPhase,
@@ -34,7 +32,6 @@ from phase_core import (
     ControlMemory,
 )
 from phase_metrics import LoadShiftMetrics
-from phase_targets import compute_single_support_entry_progress
 
 
 def build_single_support_com_ref(
@@ -128,7 +125,6 @@ def run_single_support_control(
     from direct_single_support import (
         apply_measured_cop_feedback,
         build_corner_patch_wrench_task,
-        compute_corner_patch_force_reference,
         compute_corner_patch_wrench_force_reference,
         wrap_to_pi,
         yaw_from_rotation,
