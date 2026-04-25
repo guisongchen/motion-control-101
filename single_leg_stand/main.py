@@ -43,7 +43,7 @@ from utils import (
 
 from phase_core import (
     ControlPhase,
-    PhaseTiming,
+    StabilityGate,
     SingleSupportState,
     CentroidalState,
     TaskReference,
@@ -55,7 +55,6 @@ from phase_core import (
     format_vector,
     compute_phase_com_target,
     world_point_to_local_body_point,
-    phase_elapsed,
 )
 from phase_metrics import compute_load_shift_metrics
 from phase_targets import (
@@ -79,71 +78,6 @@ from direct_single_support import (
     yaw_from_rotation,
     DIRECT_SINGLE_SUPPORT_CONFIG as direct_cfg,
 )
-
-
-def update_phase_machine(
-    phase_timing: PhaseTiming,
-    ss_state: SingleSupportState,
-    t: float,
-    c: np.ndarray,
-    c_dot: np.ndarray,
-    L: np.ndarray,
-    foot_contacts: list[dict],
-    locked_support_foot_link: int,
-    swing_foot_link: int,
-    initial_foot_pos: dict[int, np.ndarray],
-    candidate_foot_links: list[int],
-    joint_positions: np.ndarray,
-    c_ref: np.ndarray,
-    foot_name_map: dict[int, str],
-) -> str | None:
-    """Advance the high-level control phase when entry/exit conditions are met."""
-    if phase_timing.phase == ControlPhase.INIT_SETTLE:
-        return check_init_settle_transition(phase_timing, t)
-
-    if phase_timing.phase == ControlPhase.DOUBLE_SUPPORT_HOLD:
-        return check_double_support_transition(
-            phase_timing,
-            t,
-            foot_contacts,
-            candidate_foot_links,
-            initial_foot_pos,
-            locked_support_foot_link,
-            c_dot,
-            L,
-            foot_name_map,
-        )
-
-    load_shift_metrics = compute_load_shift_metrics(
-        c,
-        c_dot,
-        foot_contacts,
-        locked_support_foot_link,
-        swing_foot_link,
-        initial_foot_pos,
-    )
-
-    if phase_timing.phase == ControlPhase.LOAD_SHIFT:
-        return check_load_shift_transition(phase_timing, t, load_shift_metrics)
-
-    if phase_timing.phase == ControlPhase.PRE_LIFTOFF:
-        return check_pre_liftoff_transition(
-            phase_timing,
-            ss_state,
-            t,
-            load_shift_metrics,
-            c,
-            c_dot,
-            c_ref,
-            swing_foot_link,
-            candidate_foot_links,
-            joint_positions,
-            initial_foot_pos,
-            foot_name_map,
-            locked_support_foot_link,
-        )
-
-    return None
 
 
 def main() -> None:
@@ -238,11 +172,11 @@ def main() -> None:
     initial_foot_pos = {link: robot.get_link_com_position(link) for link in candidate_foot_links}
     locked_support_foot_link = preferred_support_foot_link
     filtered_support_point = initial_foot_pos[preferred_support_foot_link].copy()
-    phase_timing = PhaseTiming(
-        phase=ControlPhase.INIT_SETTLE,
-        phase_start_time=0.0,
-        ready_since=None,
-    )
+    phase = ControlPhase.INIT_SETTLE
+    phase_start_time = 0.0
+    double_support_gate = StabilityGate()
+    load_shift_gate = StabilityGate()
+    pre_liftoff_gate = StabilityGate()
     ss_state = SingleSupportState(
         filtered_cop_world=np.array(initial_support_metrics["cop_position"], copy=True),
         prev_filtered_cop_world=np.array(initial_support_metrics["cop_position"], copy=True),
@@ -266,8 +200,8 @@ def main() -> None:
 
     for step in range(total_steps):
         t = step * DT_SIM
-        use_wbc = phase_timing.phase == ControlPhase.SINGLE_SUPPORT
-        lock_support = phase_timing.phase in (
+        use_wbc = phase == ControlPhase.SINGLE_SUPPORT
+        lock_support = phase in (
             ControlPhase.LOAD_SHIFT,
             ControlPhase.PRE_LIFTOFF,
             ControlPhase.SINGLE_SUPPORT,
@@ -280,26 +214,60 @@ def main() -> None:
         v = state["v"]
         support_foot_link = state["support_foot_link"]
         foot_contacts = state["foot_contacts"]
-
-        transition_msg = update_phase_machine(
-            phase_timing,
-            ss_state,
-            t,
+        load_shift_metrics = compute_load_shift_metrics(
             c,
             c_dot,
-            L,
             foot_contacts,
             locked_support_foot_link,
             swing_foot_link,
             initial_foot_pos,
-            candidate_foot_links,
-            q[7:],
-            c_ref,
-            robot.link_to_foot_name,
         )
-        if transition_msg is not None:
+
+        transition = None
+        if phase == ControlPhase.INIT_SETTLE:
+            transition = check_init_settle_transition(phase, phase_start_time, t)
+        elif phase == ControlPhase.DOUBLE_SUPPORT_HOLD:
+            transition = check_double_support_transition(
+                phase,
+                phase_start_time,
+                t,
+                double_support_gate,
+                foot_contacts,
+                candidate_foot_links,
+                initial_foot_pos,
+                locked_support_foot_link,
+                c_dot,
+                L,
+                robot.link_to_foot_name,
+            )
+        elif phase == ControlPhase.LOAD_SHIFT:
+            transition = check_load_shift_transition(
+                phase, phase_start_time, t, load_shift_gate, load_shift_metrics
+            )
+        elif phase == ControlPhase.PRE_LIFTOFF:
+            transition = check_pre_liftoff_transition(
+                phase,
+                phase_start_time,
+                ss_state,
+                t,
+                pre_liftoff_gate,
+                load_shift_metrics,
+                c,
+                c_dot,
+                c_ref,
+                swing_foot_link,
+                candidate_foot_links,
+                q[7:],
+                initial_foot_pos,
+                robot.link_to_foot_name,
+                locked_support_foot_link,
+            )
+
+        if transition is not None:
+            phase, transition_msg = transition
+            phase_start_time = t
             print(f"[INFO] t={t:.3f}s 进入阶段: {transition_msg}")
-            if phase_timing.phase == ControlPhase.SINGLE_SUPPORT:
+            if phase == ControlPhase.SINGLE_SUPPORT:
                 # Override WBC gains to proven direct-single-support values
                 wbc_module.Kp_c = direct_cfg.control.com_kp
                 wbc_module.Kd_c = direct_cfg.control.com_kd
@@ -322,12 +290,12 @@ def main() -> None:
                     robot, support_foot_link, initial_support_contact
                 )
 
-        lock_support = phase_timing.phase in (
+        lock_support = phase in (
             ControlPhase.LOAD_SHIFT,
             ControlPhase.PRE_LIFTOFF,
             ControlPhase.SINGLE_SUPPORT,
         )
-        use_wbc = phase_timing.phase == ControlPhase.SINGLE_SUPPORT
+        use_wbc = phase == ControlPhase.SINGLE_SUPPORT
         if lock_support:
             support_foot_link = locked_support_foot_link
             support_contact = get_contact_entry(foot_contacts, support_foot_link)
@@ -344,18 +312,10 @@ def main() -> None:
         else:
             p_foot = state["p_foot"]
 
-        load_shift_metrics = compute_load_shift_metrics(
-            c,
-            c_dot,
-            foot_contacts,
-            locked_support_foot_link,
-            swing_foot_link,
-            initial_foot_pos,
-        )
-        update_single_support_establishment(ss_state, phase_timing.phase, t, load_shift_metrics)
+        update_single_support_establishment(ss_state, phase, t, load_shift_metrics)
         c_ref = compute_phase_com_target(
             nominal_c_ref,
-            phase_timing.phase,
+            phase,
             ss_state.com_ref,
             initial_foot_pos,
             locked_support_foot_link,
@@ -366,12 +326,13 @@ def main() -> None:
 
         J_c = None
         active_wbc_solver = wbc_ss
-        entry_progress = compute_single_support_entry_progress(phase_timing, t)
+        entry_progress = compute_single_support_entry_progress(phase, phase_start_time, t)
         if use_wbc:
             f_ref, mpc_force_target, wbc_result, active_wbc_solver, J_c, mpc_result = (
                 run_single_support_control(
                     robot,
-                    phase_timing,
+                    phase,
+                    phase_start_time,
                     ss_state,
                     t,
                     step,
@@ -419,7 +380,8 @@ def main() -> None:
         safe_targets = build_safe_targets(
             initial_dof_angles,
             joint_name_to_dof_idx,
-            phase_timing,
+            phase,
+            phase_start_time,
             ss_state.joint_ref,
             t,
             swing_leg,
@@ -438,7 +400,8 @@ def main() -> None:
             tau_min_limits,
             tau_max_limits,
             swing_leg_dof_indices,
-            phase_timing,
+            phase,
+            phase_start_time,
             t,
             load_shift_metrics,
         )
@@ -454,7 +417,7 @@ def main() -> None:
             support_force = support_contact["normal_force"] if support_contact is not None else 0.0
             hold_force_threshold = (
                 SINGLE_SUPPORT_HOLD_FORCE
-                if phase_timing.phase == ControlPhase.SINGLE_SUPPORT
+                if phase == ControlPhase.SINGLE_SUPPORT
                 else MIN_SUPPORT_FORCE
             )
 
@@ -462,7 +425,7 @@ def main() -> None:
                 1.0,
                 max(
                     0.0,
-                    phase_elapsed(phase_timing, t) / max(TRANSITION_BLEND_TIME, SINGLE_SUPPORT_ENTRY_TIME),
+                    (t - phase_start_time) / max(TRANSITION_BLEND_TIME, SINGLE_SUPPORT_ENTRY_TIME),
                 ),
             )
             if wbc_result is not None:
@@ -477,7 +440,7 @@ def main() -> None:
             support_alpha = min(1.0, max(0.0, support_force / max(MIN_SUPPORT_FORCE, 1e-6)))
             max_tau_blend = (
                 SINGLE_SUPPORT_MAX_TAU_BLEND
-                if phase_timing.phase == ControlPhase.SINGLE_SUPPORT
+                if phase == ControlPhase.SINGLE_SUPPORT
                 else 1.0
             )
             effective_alpha = min(
@@ -507,7 +470,7 @@ def main() -> None:
                 )
                 print(
                     f"[WARN] t={t:.3f}s using fallback support torque: {fallback_reason}, "
-                    f"phase={phase_timing.phase.name}, "
+                    f"phase={phase.name}, "
                     f"support={support_name(robot.link_to_foot_name, support_foot_link)}, "
                     f"force={support_force:.1f}N, alpha={effective_alpha:.2f}, "
                     f"rank(Jc)={np.linalg.matrix_rank(J_c_lin)}, "
@@ -550,7 +513,7 @@ def main() -> None:
             mpc_f_ref_log.append(np.zeros(3))
 
         if (step + 1) % 240 == 0:
-            print(f"\n--- t={t:.3f}s [{phase_timing.phase.name}] ---")
+            print(f"\n--- t={t:.3f}s [{phase.name}] ---")
             print(
                 f"  CoM: [{c[0]:.3f}, {c[1]:.3f}, {c[2]:.3f}]  "
                 f"(ref [{c_ref[0]:.3f}, {c_ref[1]:.3f}, {c_ref[2]:.2f}])"
@@ -566,7 +529,7 @@ def main() -> None:
                 f"forward_error={c[0] - c_ref[0]:.3f}m  "
                 f"forward_vel={c_dot[0]:.3f}m/s  "
                 f"swing_slip={load_shift_metrics.swing_slip*1000:.2f}mm  "
-                f"unload={compute_swing_unload_factor(phase_timing, t, load_shift_metrics):.2f}  "
+                f"unload={compute_swing_unload_factor(phase, phase_start_time, t, load_shift_metrics):.2f}  "
                 f"entry={entry_progress:.2f}  "
                 f"established={int(ss_state.established)}"
             )

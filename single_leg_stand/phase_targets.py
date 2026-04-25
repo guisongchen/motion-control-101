@@ -42,7 +42,7 @@ from config import (
     SINGLE_SUPPORT_FORWARD_ERROR_CLIP,
     SINGLE_SUPPORT_SUPPORT_HIP_PITCH_DELTA,
 )
-from phase_core import ControlPhase, PhaseTiming, phase_elapsed
+from phase_core import ControlPhase
 from phase_metrics import LoadShiftMetrics
 from utils import compute_pd_torque
 
@@ -103,24 +103,25 @@ def blend_joint_targets_toward_pose(
         )
 
 
-def compute_load_shift_progress(phase_timing: PhaseTiming, t: float) -> float:
+def compute_load_shift_progress(phase: ControlPhase, phase_start_time: float, t: float) -> float:
     """Compute normalized load-transfer progress for posture shaping."""
-    if phase_timing.phase in (ControlPhase.INIT_SETTLE, ControlPhase.DOUBLE_SUPPORT_HOLD):
+    if phase in (ControlPhase.INIT_SETTLE, ControlPhase.DOUBLE_SUPPORT_HOLD):
         return 0.0
-    if phase_timing.phase == ControlPhase.LOAD_SHIFT:
-        return min(1.0, phase_elapsed(phase_timing, t) / max(LOAD_SHIFT_TIME, 1e-6))
+    if phase == ControlPhase.LOAD_SHIFT:
+        return min(1.0, (t - phase_start_time) / max(LOAD_SHIFT_TIME, 1e-6))
     return 1.0
 
 
 def compute_preliftoff_unload(
-    phase_timing: PhaseTiming,
+    phase: ControlPhase,
+    phase_start_time: float,
     t: float,
     load_shift_metrics: LoadShiftMetrics,
 ) -> float:
     """Compute how strongly PRE_LIFTOFF should unload the swing foot."""
-    if phase_timing.phase != ControlPhase.PRE_LIFTOFF:
+    if phase != ControlPhase.PRE_LIFTOFF:
         return 0.0
-    elapsed = phase_elapsed(phase_timing, t)
+    elapsed = t - phase_start_time
     time_progress = min(1.0, elapsed / max(PRE_LIFTOFF_TIME, 1e-6))
     force_ratio = min(
         1.0, load_shift_metrics.swing_force / max(2.0 * PRE_LIFTOFF_SWING_FORCE_MAX, 1e-6)
@@ -131,19 +132,22 @@ def compute_preliftoff_unload(
     return time_progress * force_ratio * slip_guard
 
 
-def compute_single_support_entry_progress(phase_timing: PhaseTiming, t: float) -> float:
+def compute_single_support_entry_progress(
+    phase: ControlPhase, phase_start_time: float, t: float
+) -> float:
     """Normalized progress through the guarded single-support entry window."""
-    if phase_timing.phase != ControlPhase.SINGLE_SUPPORT:
+    if phase != ControlPhase.SINGLE_SUPPORT:
         return 1.0
-    return min(1.0, phase_elapsed(phase_timing, t) / max(SINGLE_SUPPORT_ENTRY_TIME, 1e-6))
+    return min(1.0, (t - phase_start_time) / max(SINGLE_SUPPORT_ENTRY_TIME, 1e-6))
 
 
 def compute_single_support_unload(
-    phase_timing: PhaseTiming,
+    phase: ControlPhase,
+    phase_start_time: float,
     load_shift_metrics: LoadShiftMetrics,
 ) -> float:
     """Keep unloading the swing foot if it still carries too much contact in single support."""
-    if phase_timing.phase != ControlPhase.SINGLE_SUPPORT:
+    if phase != ControlPhase.SINGLE_SUPPORT:
         return 0.0
     force_error = max(
         0.0,
@@ -161,32 +165,34 @@ def compute_single_support_unload(
 
 
 def compute_swing_unload_factor(
-    phase_timing: PhaseTiming,
+    phase: ControlPhase,
+    phase_start_time: float,
     t: float,
     load_shift_metrics: LoadShiftMetrics,
 ) -> float:
     """How much swing-leg relaxation to apply around the pre-liftoff handoff."""
-    if phase_timing.phase == ControlPhase.PRE_LIFTOFF:
-        return compute_preliftoff_unload(phase_timing, t, load_shift_metrics)
-    if phase_timing.phase == ControlPhase.SINGLE_SUPPORT:
-        entry_tail = max(0.0, 1.0 - compute_single_support_entry_progress(phase_timing, t))
-        contact_tail = compute_single_support_unload(phase_timing, load_shift_metrics)
+    if phase == ControlPhase.PRE_LIFTOFF:
+        return compute_preliftoff_unload(phase, phase_start_time, t, load_shift_metrics)
+    if phase == ControlPhase.SINGLE_SUPPORT:
+        entry_tail = max(0.0, 1.0 - compute_single_support_entry_progress(phase, phase_start_time, t))
+        contact_tail = compute_single_support_unload(phase, phase_start_time, load_shift_metrics)
         return max(entry_tail, contact_tail)
     return 0.0
 
 
 def compute_swing_progress(
-    phase_timing: PhaseTiming,
+    phase: ControlPhase,
+    phase_start_time: float,
     t: float,
     load_shift_metrics: LoadShiftMetrics,
 ) -> float:
     """Compute normalized swing progress based on the active phase."""
-    elapsed = phase_elapsed(phase_timing, t)
-    if phase_timing.phase in (ControlPhase.INIT_SETTLE, ControlPhase.DOUBLE_SUPPORT_HOLD, ControlPhase.LOAD_SHIFT):
+    elapsed = t - phase_start_time
+    if phase in (ControlPhase.INIT_SETTLE, ControlPhase.DOUBLE_SUPPORT_HOLD, ControlPhase.LOAD_SHIFT):
         return 0.0
-    if phase_timing.phase == ControlPhase.PRE_LIFTOFF:
+    if phase == ControlPhase.PRE_LIFTOFF:
         base_progress = PRE_LIFTOFF_SWING_PROGRESS * min(1.0, elapsed / max(PRE_LIFTOFF_TIME, 1e-6))
-        unload_progress = compute_preliftoff_unload(phase_timing, t, load_shift_metrics)
+        unload_progress = compute_preliftoff_unload(phase, phase_start_time, t, load_shift_metrics)
         return min(0.6, base_progress + PRE_LIFTOFF_EXTRA_SWING_PROGRESS * unload_progress)
     single_support_elapsed = max(0.0, elapsed - SINGLE_SUPPORT_ENTRY_TIME)
     single_support_progress = min(
@@ -204,7 +210,8 @@ def compute_swing_progress(
 def _apply_load_shift_targets(
     targets: np.ndarray,
     joint_name_to_dof_idx: dict[str, int],
-    phase_timing: PhaseTiming,
+    phase: ControlPhase,
+    phase_start_time: float,
     t: float,
     load_shift_metrics: LoadShiftMetrics,
     support_leg: str,
@@ -222,7 +229,7 @@ def _apply_load_shift_targets(
             + 0.3 * com_error / max(target_com_ratio, 1e-6)
         ),
     )
-    load_shift_progress = compute_load_shift_progress(phase_timing, t)
+    load_shift_progress = compute_load_shift_progress(phase, phase_start_time, t)
     roll_delta = min(load_shift_progress * LOAD_SHIFT_ROLL_DELTA, roll_feedback)
     slip_scale = max(0.0, 1.0 - load_shift_metrics.swing_slip / max(SLIP_THRESH, 1e-6))
     roll_delta *= slip_scale
@@ -232,7 +239,8 @@ def _apply_load_shift_targets(
 def _apply_pre_liftoff_targets(
     targets: np.ndarray,
     joint_name_to_dof_idx: dict[str, int],
-    phase_timing: PhaseTiming,
+    phase: ControlPhase,
+    phase_start_time: float,
     t: float,
     load_shift_metrics: LoadShiftMetrics,
     c: np.ndarray,
@@ -255,7 +263,7 @@ def _apply_pre_liftoff_targets(
             + 0.3 * com_error / max(target_com_ratio, 1e-6)
         ),
     )
-    load_shift_progress = compute_load_shift_progress(phase_timing, t)
+    load_shift_progress = compute_load_shift_progress(phase, phase_start_time, t)
     roll_delta = min(load_shift_progress * LOAD_SHIFT_ROLL_DELTA, roll_feedback)
 
     swing_force_error = max(
@@ -271,7 +279,7 @@ def _apply_pre_liftoff_targets(
 
     time_progress = min(
         1.0,
-        phase_elapsed(phase_timing, t) / max(PRE_LIFTOFF_TIME, 1e-6),
+        (t - phase_start_time) / max(PRE_LIFTOFF_TIME, 1e-6),
     )
     pose_blend = 0.75 * time_progress * slip_scale
     blend_joint_targets_toward_pose(
@@ -296,7 +304,8 @@ def _apply_pre_liftoff_targets(
 def _apply_single_support_targets(
     targets: np.ndarray,
     joint_name_to_dof_idx: dict[str, int],
-    phase_timing: PhaseTiming,
+    phase: ControlPhase,
+    phase_start_time: float,
     t: float,
     c: np.ndarray,
     c_ref: np.ndarray,
@@ -316,7 +325,7 @@ def _apply_single_support_targets(
             + 0.3 * com_error / max(target_com_ratio, 1e-6)
         ),
     )
-    load_shift_progress = compute_load_shift_progress(phase_timing, t)
+    load_shift_progress = compute_load_shift_progress(phase, phase_start_time, t)
     roll_delta = min(load_shift_progress * LOAD_SHIFT_ROLL_DELTA, roll_feedback)
 
     swing_force_error = max(
@@ -344,7 +353,8 @@ def _apply_single_support_targets(
 def build_safe_targets(
     initial_dof_angles: np.ndarray,
     joint_name_to_dof_idx: dict[str, int],
-    phase_timing: PhaseTiming,
+    phase: ControlPhase,
+    phase_start_time: float,
     single_support_joint_ref: np.ndarray | None,
     t: float,
     swing_leg: str,
@@ -357,15 +367,15 @@ def build_safe_targets(
 ) -> np.ndarray:
     """Build posture targets for the current phase."""
     if (
-        phase_timing.phase == ControlPhase.SINGLE_SUPPORT
+        phase == ControlPhase.SINGLE_SUPPORT
         and single_support_joint_ref is not None
     ):
         targets = single_support_joint_ref.copy()
     else:
         targets = initial_dof_angles.copy()
 
-    swing_progress = compute_swing_progress(phase_timing, t, load_shift_metrics)
-    load_shift_progress = compute_load_shift_progress(phase_timing, t)
+    swing_progress = compute_swing_progress(phase, phase_start_time, t, load_shift_metrics)
+    load_shift_progress = compute_load_shift_progress(phase, phase_start_time, t)
 
     hip_name = f"{swing_leg}_hip_pitch_joint"
     knee_name = f"{swing_leg}_knee_joint"
@@ -388,15 +398,16 @@ def build_safe_targets(
     ]
 
     if load_shift_progress > 0.0:
-        if phase_timing.phase == ControlPhase.LOAD_SHIFT:
+        if phase == ControlPhase.LOAD_SHIFT:
             _apply_load_shift_targets(
-                targets, joint_name_to_dof_idx, phase_timing, t, load_shift_metrics, support_leg
+                targets, joint_name_to_dof_idx, phase, phase_start_time, t, load_shift_metrics, support_leg
             )
-        elif phase_timing.phase == ControlPhase.PRE_LIFTOFF:
+        elif phase == ControlPhase.PRE_LIFTOFF:
             _apply_pre_liftoff_targets(
                 targets,
                 joint_name_to_dof_idx,
-                phase_timing,
+                phase,
+                phase_start_time,
                 t,
                 load_shift_metrics,
                 c,
@@ -406,11 +417,12 @@ def build_safe_targets(
                 preliftoff_pose_joint_names,
                 support_leg,
             )
-        elif phase_timing.phase == ControlPhase.SINGLE_SUPPORT:
+        elif phase == ControlPhase.SINGLE_SUPPORT:
             _apply_single_support_targets(
                 targets,
                 joint_name_to_dof_idx,
-                phase_timing,
+                phase,
+                phase_start_time,
                 t,
                 c,
                 c_ref,
@@ -419,10 +431,10 @@ def build_safe_targets(
             )
 
     # Swing leg trajectory
-    if phase_timing.phase == ControlPhase.SINGLE_SUPPORT and single_support_joint_ref is not None:
+    if phase == ControlPhase.SINGLE_SUPPORT and single_support_joint_ref is not None:
         pose_progress = min(
             1.0,
-            phase_elapsed(phase_timing, t) / max(SINGLE_SUPPORT_POSE_BLEND_TIME, 1e-6),
+            (t - phase_start_time) / max(SINGLE_SUPPORT_POSE_BLEND_TIME, 1e-6),
         )
         opt_hip = (
             optimized_joint_angles[joint_name_to_dof_idx[hip_name]]
@@ -465,7 +477,7 @@ def build_safe_targets(
         )
 
     if (
-        phase_timing.phase != ControlPhase.SINGLE_SUPPORT
+        phase != ControlPhase.SINGLE_SUPPORT
         or single_support_joint_ref is None
     ) and knee_name in joint_name_to_dof_idx:
         knee_idx = joint_name_to_dof_idx[knee_name]
@@ -486,7 +498,8 @@ def compute_safe_tau(
     tau_min_limits: np.ndarray,
     tau_max_limits: np.ndarray,
     swing_leg_dof_indices: list[int],
-    phase_timing: PhaseTiming,
+    phase: ControlPhase,
+    phase_start_time: float,
     t: float,
     load_shift_metrics: LoadShiftMetrics,
 ) -> np.ndarray:
@@ -502,7 +515,7 @@ def compute_safe_tau(
 
     if swing_leg_dof_indices:
         swing_idx = np.array(swing_leg_dof_indices, dtype=int)
-        unload_progress = compute_swing_unload_factor(phase_timing, t, load_shift_metrics)
+        unload_progress = compute_swing_unload_factor(phase, phase_start_time, t, load_shift_metrics)
         swing_kp_scale = 1.0 - unload_progress * (1.0 - PRE_LIFTOFF_SWING_KP_SCALE)
         swing_kd_scale = 1.0 - unload_progress * (1.0 - PRE_LIFTOFF_SWING_KD_SCALE)
         safe_tau[swing_idx] = (

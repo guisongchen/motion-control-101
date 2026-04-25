@@ -23,12 +23,18 @@ class ControlPhase(Enum):
 
 
 @dataclass
-class PhaseTiming:
-    """Temporal state for the high-level phase machine."""
+class StabilityGate:
+    """Debounce gate: condition must stay true for a hold time before firing."""
 
-    phase: ControlPhase
-    phase_start_time: float
     ready_since: Optional[float] = None
+
+    def check(self, condition: bool, t: float, hold_time: float) -> bool:
+        if not condition:
+            self.ready_since = None
+            return False
+        if self.ready_since is None:
+            self.ready_since = t
+        return t - self.ready_since >= hold_time
 
 
 @dataclass
@@ -142,18 +148,6 @@ def get_contact_entry(foot_contacts: list[dict], link: int) -> Optional[dict]:
 def support_name(foot_name_map: dict[int, str], link: int) -> str:
     """Map support link index back to the configured foot name."""
     return foot_name_map.get(link, str(link))
-
-
-def transition_phase(phase_timing: PhaseTiming, new_phase: ControlPhase, t: float) -> None:
-    """Switch phases and reset per-phase timers."""
-    phase_timing.phase = new_phase
-    phase_timing.phase_start_time = t
-    phase_timing.ready_since = None
-
-
-def phase_elapsed(phase_timing: PhaseTiming, t: float) -> float:
-    """Elapsed wall-clock simulation time inside the current phase."""
-    return t - phase_timing.phase_start_time
 
 
 def world_point_to_local_body_point(

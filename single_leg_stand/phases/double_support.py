@@ -17,16 +17,16 @@ from config import (
 )
 from phase_core import (
     ControlPhase,
-    PhaseTiming,
-    phase_elapsed,
+    StabilityGate,
     get_contact_entry,
-    transition_phase,
 )
 
 
 def check_double_support_transition(
-    phase_timing: PhaseTiming,
+    phase: ControlPhase,
+    phase_start_time: float,
     t: float,
+    gate: StabilityGate,
     foot_contacts: list[dict],
     candidate_foot_links: list[int],
     initial_foot_pos: dict[int, np.ndarray],
@@ -34,7 +34,7 @@ def check_double_support_transition(
     c_dot: np.ndarray,
     L: np.ndarray,
     foot_name_map: dict[int, str],
-) -> Optional[str]:
+) -> Optional[tuple[ControlPhase, str]]:
     """Transition to LOAD_SHIFT when both feet are stable and loaded."""
     double_support_forces = [
         get_contact_entry(foot_contacts, link)["normal_force"]
@@ -60,16 +60,15 @@ def check_double_support_transition(
     if total_force > 1e-6:
         balanced = (min(double_support_forces) / total_force) >= DOUBLE_SUPPORT_FORCE_RATIO_MIN
 
-    if both_feet_ready and stable_slip and com_vel_ok and momentum_ok and balanced:
-        if phase_timing.ready_since is None:
-            phase_timing.ready_since = t
-        if t - phase_timing.ready_since >= DOUBLE_SUPPORT_READY_TIME:
-            transition_phase(phase_timing, ControlPhase.LOAD_SHIFT, t)
-            from phase_core import support_name
-            return (
-                "load shift "
-                f"(support={support_name(foot_name_map, preferred_support_foot_link)})"
-            )
-    else:
-        phase_timing.ready_since = None
+    if gate.check(
+        both_feet_ready and stable_slip and com_vel_ok and momentum_ok and balanced,
+        t,
+        DOUBLE_SUPPORT_READY_TIME,
+    ):
+        from phase_core import support_name
+        return (
+            ControlPhase.LOAD_SHIFT,
+            "load shift "
+            f"(support={support_name(foot_name_map, preferred_support_foot_link)})"
+        )
     return None

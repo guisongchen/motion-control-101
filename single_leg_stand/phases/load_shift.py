@@ -13,17 +13,19 @@ from config import (
     SLIP_THRESH,
     LOAD_SHIFT_READY_TIME,
 )
-from phase_core import ControlPhase, PhaseTiming, phase_elapsed, transition_phase
+from phase_core import ControlPhase, StabilityGate
 from phase_metrics import LoadShiftMetrics
 
 
 def check_load_shift_transition(
-    phase_timing: PhaseTiming,
+    phase: ControlPhase,
+    phase_start_time: float,
     t: float,
+    gate: StabilityGate,
     load_shift_metrics: LoadShiftMetrics,
-) -> Optional[str]:
+) -> Optional[tuple[ControlPhase, str]]:
     """Transition to PRE_LIFTOFF when weight transfer metrics are satisfied."""
-    elapsed = phase_elapsed(phase_timing, t)
+    elapsed = t - phase_start_time
     load_shift_ready = (
         elapsed >= LOAD_SHIFT_TIME
         and load_shift_metrics.support_force >= DOUBLE_SUPPORT_MIN_FORCE
@@ -33,16 +35,11 @@ def check_load_shift_transition(
         and load_shift_metrics.support_slip <= SLIP_THRESH
         and load_shift_metrics.swing_slip <= SLIP_THRESH
     )
-    if load_shift_ready:
-        if phase_timing.ready_since is None:
-            phase_timing.ready_since = t
-        if t - phase_timing.ready_since >= LOAD_SHIFT_READY_TIME:
-            transition_phase(phase_timing, ControlPhase.PRE_LIFTOFF, t)
-            return (
-                "pre-liftoff "
-                f"(support_ratio={load_shift_metrics.support_ratio:.2f}, "
-                f"com_shift={load_shift_metrics.com_shift_ratio:.2f})"
-            )
-    else:
-        phase_timing.ready_since = None
+    if gate.check(load_shift_ready, t, LOAD_SHIFT_READY_TIME):
+        return (
+            ControlPhase.PRE_LIFTOFF,
+            "pre-liftoff "
+            f"(support_ratio={load_shift_metrics.support_ratio:.2f}, "
+            f"com_shift={load_shift_metrics.com_shift_ratio:.2f})"
+        )
     return None
