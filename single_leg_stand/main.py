@@ -223,14 +223,12 @@ def main() -> None:
             initial_foot_pos,
         )
 
-        transition = None
+        next_phase = None
         if phase == ControlPhase.INIT_SETTLE:
             if t - phase_start_time >= INIT_SETTLE_TIME:
-                transition = ControlPhase.DOUBLE_SUPPORT_HOLD, "double-support validation"
-            else:
-                transition = None
+                next_phase = ControlPhase.DOUBLE_SUPPORT_HOLD
         elif phase == ControlPhase.DOUBLE_SUPPORT_HOLD:
-            transition = check_double_support_transition(
+            next_phase = check_double_support_transition(
                 phase,
                 phase_start_time,
                 t,
@@ -238,17 +236,15 @@ def main() -> None:
                 foot_contacts,
                 candidate_foot_links,
                 initial_foot_pos,
-                locked_support_foot_link,
                 c_dot,
                 L,
-                robot.link_to_foot_name,
             )
         elif phase == ControlPhase.LOAD_SHIFT:
-            transition = check_load_shift_transition(
+            next_phase = check_load_shift_transition(
                 phase, phase_start_time, t, load_shift_gate, load_shift_metrics
             )
         elif phase == ControlPhase.PRE_LIFTOFF:
-            transition = check_pre_liftoff_transition(
+            next_phase = check_pre_liftoff_transition(
                 phase,
                 phase_start_time,
                 ss_state,
@@ -259,17 +255,15 @@ def main() -> None:
                 c_dot,
                 c_ref,
                 swing_foot_link,
-                candidate_foot_links,
                 q[7:],
                 initial_foot_pos,
-                robot.link_to_foot_name,
                 locked_support_foot_link,
             )
 
-        if transition is not None:
-            phase, transition_msg = transition
+        if next_phase is not None:
+            phase = next_phase
             phase_start_time = t
-            print(f"[INFO] t={t:.3f}s 进入阶段: {transition_msg}")
+            print(f"[INFO] t={t:.3f}s 进入阶段: {phase.name}")
             if phase == ControlPhase.SINGLE_SUPPORT:
                 # Override WBC gains to proven direct-single-support values
                 wbc_module.Kp_c = direct_cfg.control.com_kp

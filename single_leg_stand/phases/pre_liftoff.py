@@ -36,12 +36,10 @@ def check_pre_liftoff_transition(
     c_dot: np.ndarray,
     c_ref: np.ndarray,
     swing_foot_link: int,
-    candidate_foot_links: list[int],
     joint_positions: np.ndarray,
     initial_foot_pos: dict[int, np.ndarray],
-    foot_name_map: dict[int, str],
     locked_support_foot_link: int,
-) -> Optional[tuple[ControlPhase, str]]:
+) -> Optional[ControlPhase]:
     """Transition to SINGLE_SUPPORT when pre-liftoff readiness is achieved."""
     elapsed = t - phase_start_time
     forward_error, forward_velocity = compute_forward_handoff_metrics(c, c_dot, c_ref)
@@ -60,7 +58,6 @@ def check_pre_liftoff_transition(
     )
     if gate.check(pre_liftoff_ready, t, PRE_LIFTOFF_READY_TIME):
         from phases.single_support import build_single_support_com_ref
-        from phase_core import support_name
         ss_state.com_ref = build_single_support_com_ref(
             c,
             initial_foot_pos,
@@ -70,13 +67,5 @@ def check_pre_liftoff_transition(
         ss_state.joint_ref = joint_positions.copy()
         ss_state.ready_since = None
         ss_state.established = False
-        return (
-            ControlPhase.SINGLE_SUPPORT,
-            "single-support control "
-            f"(support={support_name(foot_name_map, locked_support_foot_link)}, "
-            f"support_ratio={load_shift_metrics.support_ratio:.2f}, "
-            f"swing_force={load_shift_metrics.swing_force:.1f}N, "
-            f"forward_error={forward_error:.3f}m, "
-            f"forward_vel={forward_velocity:.3f}m/s)"
-        )
+        return ControlPhase.SINGLE_SUPPORT
     return None

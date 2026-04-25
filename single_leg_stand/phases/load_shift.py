@@ -23,7 +23,7 @@ def check_load_shift_transition(
     t: float,
     gate: StabilityGate,
     load_shift_metrics: LoadShiftMetrics,
-) -> Optional[tuple[ControlPhase, str]]:
+) -> Optional[ControlPhase]:
     """Transition to PRE_LIFTOFF when weight transfer metrics are satisfied."""
     elapsed = t - phase_start_time
     load_shift_ready = (
@@ -36,10 +36,5 @@ def check_load_shift_transition(
         and load_shift_metrics.swing_slip <= SLIP_THRESH
     )
     if gate.check(load_shift_ready, t, LOAD_SHIFT_READY_TIME):
-        return (
-            ControlPhase.PRE_LIFTOFF,
-            "pre-liftoff "
-            f"(support_ratio={load_shift_metrics.support_ratio:.2f}, "
-            f"com_shift={load_shift_metrics.com_shift_ratio:.2f})"
-        )
+        return ControlPhase.PRE_LIFTOFF
     return None

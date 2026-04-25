@@ -15,11 +15,7 @@ from config import (
     SLIP_THRESH,
     MIN_SUPPORT_FORCE,
 )
-from phase_core import (
-    ControlPhase,
-    StabilityGate,
-    get_contact_entry,
-)
+from phase_core import ControlPhase, StabilityGate, get_contact_entry
 
 
 def check_double_support_transition(
@@ -30,11 +26,9 @@ def check_double_support_transition(
     foot_contacts: list[dict],
     candidate_foot_links: list[int],
     initial_foot_pos: dict[int, np.ndarray],
-    preferred_support_foot_link: int,
     c_dot: np.ndarray,
     L: np.ndarray,
-    foot_name_map: dict[int, str],
-) -> Optional[tuple[ControlPhase, str]]:
+) -> Optional[ControlPhase]:
     """Transition to LOAD_SHIFT when both feet are stable and loaded."""
     double_support_forces = [
         get_contact_entry(foot_contacts, link)["normal_force"]
@@ -65,10 +59,5 @@ def check_double_support_transition(
         t,
         DOUBLE_SUPPORT_READY_TIME,
     ):
-        from phase_core import support_name
-        return (
-            ControlPhase.LOAD_SHIFT,
-            "load shift "
-            f"(support={support_name(foot_name_map, preferred_support_foot_link)})"
-        )
+        return ControlPhase.LOAD_SHIFT
     return None
