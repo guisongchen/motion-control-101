@@ -288,6 +288,11 @@ def main() -> None:
         else:
             p_foot = state["p_foot"]
 
+        if phase in (ControlPhase.INIT_SETTLE, ControlPhase.DOUBLE_SUPPORT_HOLD):
+            foot_positions = [fc["position"] for fc in foot_contacts]
+            if foot_positions:
+                nominal_c_ref[:2] = np.mean([p[:2] for p in foot_positions], axis=0)
+
         update_single_support_establishment(ss_state, phase, t, load_shift_metrics)
         c_ref = compute_phase_com_target(
             nominal_c_ref,
