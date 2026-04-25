@@ -8,14 +8,13 @@ from robot_model import RobotModel
 class StateEstimator:
     """状态估计器：从 MuJoCo 读取原始状态并计算 MPC/WBC 所需量。"""
 
-    def __init__(self, robot: RobotModel, candidate_foot_links: List[int]):
+    def __init__(self, robot: RobotModel):
         """
         Args:
-            robot: RobotModel 实例
-            candidate_foot_links: 候选足端 link 索引列表，动态检测哪个在接触
+            robot: RobotModel 实例（必须已构建 foot_link_ids）
         """
         self.robot = robot
-        self.candidate_foot_links = candidate_foot_links
+        self.candidate_foot_links = robot.foot_link_ids
 
     def update(self,
                preferred_support_foot_link: int | None = None,

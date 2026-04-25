@@ -88,7 +88,7 @@ def run_direct_single_support(
     candidate_foot_links = [robot.link_name_to_index[name] for name in env_cfg.foot_link_names]
     support_link = robot.link_name_to_index[env_cfg.support_foot_name]
     swing_link = next(link for link in candidate_foot_links if link != support_link)
-    estimator = StateEstimator(robot, candidate_foot_links)
+    estimator = StateEstimator(robot)
     original_gains = (
         wbc_module.Kp_c,
         wbc_module.Kd_c,

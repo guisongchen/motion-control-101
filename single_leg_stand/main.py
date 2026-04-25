@@ -158,7 +158,7 @@ def main() -> None:
     swing_foot_link = robot.foot_name_to_link[g1_config.swing_foot_name]
     swing_leg = g1_config.lift_leg
     support_leg = "right" if swing_leg == "left" else "left"
-    estimator = StateEstimator(robot, candidate_foot_links)
+    estimator = StateEstimator(robot)
 
     initial_dof_angles = np.zeros(len(robot.dof_joints))
     joint_name_to_dof_idx = robot.dof_joint_name_to_index.copy()
@@ -178,14 +178,6 @@ def main() -> None:
     mpc = CentroidalMPC()
     wbc_ss = WholeBodyController(robot.nv, num_contacts=4)
     wbc_ss_with_swing = WholeBodyController(robot.nv, num_contacts=5)
-
-    # -----------------------------------------------------------------
-    # Load optimized single-support pose for SINGLE_SUPPORT target
-    # -----------------------------------------------------------------
-    optimized_pose_path = Path(__file__).parent / "results" / "optimized_pose_simulation_3s.json"
-    with open(optimized_pose_path, "r") as f:
-        opt_data = json.load(f)
-    optimized_joint_angles = np.array(opt_data["joint_angles"], dtype=float)
 
     # Pre-parse corner-patch contact points for the preferred support foot
     initial_support_metrics = robot.get_contact_metrics(preferred_support_foot_link)
@@ -423,22 +415,6 @@ def main() -> None:
             f_ref = u_ref.copy()
             mpc_force_target = u_ref.copy()
 
-        # Gradually blend single-support joint reference toward optimized pose
-        if (
-            phase_state.phase == ControlPhase.SINGLE_SUPPORT
-            and ss_state.joint_ref is not None
-        ):
-            from config import SINGLE_SUPPORT_POSE_BLEND_TIME
-
-            pose_progress = min(
-                1.0,
-                phase_elapsed(phase_state, t) / max(SINGLE_SUPPORT_POSE_BLEND_TIME, 1e-6),
-            )
-            ss_state.joint_ref = (
-                (1.0 - pose_progress) * ss_state.joint_ref
-                + pose_progress * optimized_joint_angles
-            )
-
         joint_positions = q[7:]
         joint_velocities = v[6:]
         C_safe = robot.compute_coriolis_gravity(q, v)
@@ -454,7 +430,6 @@ def main() -> None:
             c_dot,
             c_ref,
             load_shift_metrics,
-            optimized_joint_angles=optimized_joint_angles,
         )
         safe_tau = compute_safe_tau(
             initial_dof_angles,
