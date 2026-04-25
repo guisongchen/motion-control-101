@@ -28,6 +28,7 @@ from config import (
     SINGLE_SUPPORT_ENTRY_TIME,
     SINGLE_SUPPORT_MAX_TAU_BLEND,
     SUPPORT_POINT_FILTER,
+    INIT_SETTLE_TIME,
 )
 from robot_model import RobotModel
 from robots.unitree_g1 import g1_config
@@ -63,7 +64,6 @@ from phase_targets import (
     compute_single_support_entry_progress,
     compute_swing_unload_factor,
 )
-from phases.init_settle import check_init_settle_transition
 from phases.double_support import check_double_support_transition
 from phases.load_shift import check_load_shift_transition
 from phases.pre_liftoff import check_pre_liftoff_transition
@@ -225,7 +225,10 @@ def main() -> None:
 
         transition = None
         if phase == ControlPhase.INIT_SETTLE:
-            transition = check_init_settle_transition(phase, phase_start_time, t)
+            if t - phase_start_time >= INIT_SETTLE_TIME:
+                transition = ControlPhase.DOUBLE_SUPPORT_HOLD, "double-support validation"
+            else:
+                transition = None
         elif phase == ControlPhase.DOUBLE_SUPPORT_HOLD:
             transition = check_double_support_transition(
                 phase,
