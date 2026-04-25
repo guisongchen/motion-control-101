@@ -52,7 +52,6 @@ from phase_core import (
     format_vector,
     compute_phase_com_target,
 )
-from phase_metrics import compute_load_shift_metrics
 from phase_targets import (
     build_safe_targets,
     compute_safe_tau,
@@ -209,14 +208,7 @@ def main() -> None:
         v = state["v"]
         support_foot_link = state["support_foot_link"]
         foot_contacts = state["foot_contacts"]
-        load_shift_metrics = compute_load_shift_metrics(
-            c,
-            c_dot,
-            foot_contacts,
-            locked_support_foot_link,
-            swing_foot_link,
-            initial_foot_pos,
-        )
+        load_shift_metrics = state["load_shift_metrics"]
 
         next_phase = None  # None means hold current phase
         if phase == ControlPhase.INIT_SETTLE:

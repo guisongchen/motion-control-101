@@ -3,6 +3,7 @@
 import numpy as np
 from typing import List
 from robot_model import RobotModel
+from phase_metrics import compute_load_shift_metrics, LoadShiftMetrics
 
 
 class StateEstimator:
@@ -18,6 +19,11 @@ class StateEstimator:
         self._preferred_support_foot_link = robot.foot_name_to_link[
             robot.config.support_foot_name
         ]
+        self._swing_foot_link = next(
+            link for link in self.candidate_foot_links
+            if link != self._preferred_support_foot_link
+        )
+        self._initial_foot_pos: dict[int, np.ndarray] | None = None
 
     def update(
         self,
@@ -37,6 +43,7 @@ class StateEstimator:
                 - support_foot_link: 当前检测到的支撑足 link 索引
                 - p_foot: 支撑足质心位置 (3,)
                 - foot_contacts: 各候选足端的接触力信息 List[dict]
+                - load_shift_metrics: 负载转移指标 LoadShiftMetrics
         """
         q, v = self.robot.get_state()
 
@@ -74,6 +81,22 @@ class StateEstimator:
 
         p_foot = self.robot.get_link_com_position(support_foot_link)
 
+        # 首次更新时捕获初始足端位置（机器人已处于起始姿态）
+        if self._initial_foot_pos is None:
+            self._initial_foot_pos = {
+                link: self.robot.get_link_com_position(link)
+                for link in self.candidate_foot_links
+            }
+
+        load_shift_metrics = compute_load_shift_metrics(
+            c,
+            c_dot,
+            foot_contacts,
+            self._preferred_support_foot_link,
+            self._swing_foot_link,
+            self._initial_foot_pos,
+        )
+
         return {
             "c": c,
             "c_dot": c_dot,
@@ -83,4 +106,5 @@ class StateEstimator:
             "support_foot_link": support_foot_link,
             "p_foot": p_foot,
             "foot_contacts": foot_contacts,
+            "load_shift_metrics": load_shift_metrics,
         }
