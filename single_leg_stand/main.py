@@ -84,6 +84,170 @@ from direct_single_support import (
 import wbc as wbc_module
 
 
+def phase_locks_support(phase: ControlPhase) -> bool:
+    """Return whether the current phase should keep the support foot locked."""
+    return phase in (
+        ControlPhase.LOAD_SHIFT,
+        ControlPhase.PRE_LIFTOFF,
+        ControlPhase.SINGLE_SUPPORT,
+    )
+
+
+def uses_transfer_com_trajectory(
+    phase: ControlPhase,
+    ss_state: SingleSupportState,
+) -> bool:
+    """Return whether the DS->SS CoM handoff trajectory should remain active."""
+    return phase in (ControlPhase.LOAD_SHIFT, ControlPhase.PRE_LIFTOFF) or (
+        phase == ControlPhase.SINGLE_SUPPORT and not ss_state.established
+    )
+
+
+def determine_next_phase(
+    phase: ControlPhase,
+    elapsed: float,
+    t: float,
+    state: dict,
+    load_shift_metrics,
+    ss_state: SingleSupportState,
+    c_ref: np.ndarray,
+    swing_foot_link: int,
+    joint_positions: np.ndarray,
+    candidate_foot_links: list[int],
+    initial_foot_pos: dict[int, np.ndarray],
+    locked_support_foot_link: int,
+    robot: RobotModel,
+) -> ControlPhase | None:
+    """Return the next phase or None to hold the current phase."""
+    if phase == ControlPhase.INIT_SETTLE:
+        if elapsed >= INIT_SETTLE_TIME:
+            return ControlPhase.DOUBLE_SUPPORT_HOLD
+        return None
+
+    if phase == ControlPhase.DOUBLE_SUPPORT_HOLD:
+        return check_double_support_transition(
+            t,
+            state,
+            candidate_foot_links,
+            initial_foot_pos,
+            robot,
+        )
+
+    if phase == ControlPhase.LOAD_SHIFT:
+        load_shift_ready, _load_shift_checks = evaluate_load_shift_readiness(
+            elapsed,
+            load_shift_metrics,
+        )
+        if load_shift_ready:
+            return ControlPhase.PRE_LIFTOFF
+        return None
+
+    if phase == ControlPhase.PRE_LIFTOFF:
+        return check_pre_liftoff_transition(
+            elapsed,
+            ss_state,
+            state,
+            c_ref,
+            swing_foot_link,
+            joint_positions,
+            initial_foot_pos,
+            locked_support_foot_link,
+            robot,
+        )
+
+    return None
+
+
+def handle_phase_entry(
+    phase: ControlPhase,
+    t: float,
+    c: np.ndarray,
+    foot_contacts: list[dict],
+    nominal_c_ref: np.ndarray,
+    robot: RobotModel,
+    locked_support_foot_link: int,
+    support_foot_link: int,
+    ss_state: SingleSupportState,
+    direct_pose: np.ndarray,
+    standing_com_z: float | None,
+    initial_support_contact: np.ndarray,
+    support_contact_local_positions: list[np.ndarray],
+    initial_support_yaw: float,
+) -> tuple[
+    float | None,
+    float | None,
+    np.ndarray | None,
+    np.ndarray | None,
+    np.ndarray,
+    list[np.ndarray],
+    float,
+]:
+    """Apply phase-entry side effects and return updated phase state."""
+    ds_to_ss_transition_start_time = None
+    ds_to_ss_start_xy = None
+    ds_to_ss_end_xy = None
+
+    print(f"[INFO] t={t:.3f}s 进入阶段: {phase.name}")
+
+    if phase == ControlPhase.DOUBLE_SUPPORT_HOLD:
+        standing_com_z = float(c[2])
+    elif phase == ControlPhase.LOAD_SHIFT:
+        ds_to_ss_transition_start_time = t
+        foot_positions = [fc["position"] for fc in foot_contacts]
+        if foot_positions:
+            ds_to_ss_start_xy = np.mean([p[:2] for p in foot_positions], axis=0)
+        else:
+            ds_to_ss_start_xy = nominal_c_ref[:2].copy()
+        ds_to_ss_end_xy = compute_foot_centroid_xy(robot, locked_support_foot_link)
+    elif phase == ControlPhase.SINGLE_SUPPORT:
+        wbc_module.Kp_c = direct_cfg.control.com_kp
+        wbc_module.Kd_c = direct_cfg.control.com_kd
+        wbc_module.Kp_L = direct_cfg.control.momentum_kp
+        wbc_module.Kd_L = direct_cfg.control.momentum_kd
+
+        support_metrics_now = robot.get_contact_metrics(support_foot_link)
+        initial_support_contact = support_metrics_now["position"].copy()
+        ss_state.filtered_cop_world = np.array(
+            support_metrics_now["cop_position"],
+            copy=True,
+        )
+        ss_state.prev_filtered_cop_world = ss_state.filtered_cop_world.copy()
+        ss_state.filtered_support_position_world = np.array(
+            support_metrics_now["position"],
+            copy=True,
+        )
+        ss_state.prev_filtered_support_position_world = (
+            ss_state.filtered_support_position_world.copy()
+        )
+        initial_support_yaw = yaw_from_rotation(
+            np.array(robot.data.xmat[support_foot_link]).reshape(3, 3)
+        )
+
+        if standing_com_z is not None and ss_state.com_ref is not None:
+            ss_state.com_ref[2] = standing_com_z
+
+        if ss_state.joint_ref is None:
+            ss_state.joint_ref = direct_pose.copy()
+        ss_state.ready_since = None
+        ss_state.established = False
+
+        support_contact_local_positions = resolve_support_contact_local_positions(
+            robot,
+            support_foot_link,
+            initial_support_contact,
+        )
+
+    return (
+        standing_com_z,
+        ds_to_ss_transition_start_time,
+        ds_to_ss_start_xy,
+        ds_to_ss_end_xy,
+        initial_support_contact,
+        support_contact_local_positions,
+        initial_support_yaw,
+    )
+
+
 def main() -> None:
     robot = RobotModel(g1_config)
     robot.model.opt.gravity[:] = GRAVITY
@@ -237,107 +401,70 @@ def main() -> None:
 
     for step in range(total_steps):
         t = step * DT_SIM
-        lock_support = phase in (
-            ControlPhase.LOAD_SHIFT,
-            ControlPhase.PRE_LIFTOFF,
-            ControlPhase.SINGLE_SUPPORT,
-        )
+        lock_support = phase_locks_support(phase)
         state = estimator.update(lock_support=lock_support)
         c = state["c"]
         c_dot = state["c_dot"]
         L = state["L"]
         q = state["q"]
         v = state["v"]
+        joint_positions = q[nq_base:]
         support_foot_link = state["support_foot_link"]
         foot_contacts = state["foot_contacts"]
         load_shift_metrics = state["load_shift_metrics"]
         elapsed = t - phase_start_time
 
-        next_phase = None  # None means hold current phase
-        if phase == ControlPhase.INIT_SETTLE:
-            if elapsed >= INIT_SETTLE_TIME:
-                next_phase = ControlPhase.DOUBLE_SUPPORT_HOLD
-        elif phase == ControlPhase.DOUBLE_SUPPORT_HOLD:
-            next_phase = check_double_support_transition(
-                t,
-                state,
-                candidate_foot_links,
-                initial_foot_pos,
-                robot,
-            )
-        elif phase == ControlPhase.LOAD_SHIFT:
-            load_shift_ready, _load_shift_checks = evaluate_load_shift_readiness(
-                elapsed,
-                load_shift_metrics,
-            )
-            if load_shift_ready:
-                next_phase = ControlPhase.PRE_LIFTOFF
-        elif phase == ControlPhase.PRE_LIFTOFF:
-            next_phase = check_pre_liftoff_transition(
-                elapsed,
-                ss_state,
-                state,
-                c_ref,
-                swing_foot_link,
-                q[nq_base:],
-                initial_foot_pos,
-                locked_support_foot_link,
-                robot,
-            )
+        next_phase = determine_next_phase(
+            phase,
+            elapsed,
+            t,
+            state,
+            load_shift_metrics,
+            ss_state,
+            c_ref,
+            swing_foot_link,
+            joint_positions,
+            candidate_foot_links,
+            initial_foot_pos,
+            locked_support_foot_link,
+            robot,
+        )
 
         if next_phase is not None:
             phase = next_phase
             phase_start_time = t
-            print(f"[INFO] t={t:.3f}s 进入阶段: {phase.name}")
-            if phase == ControlPhase.DOUBLE_SUPPORT_HOLD:
-                standing_com_z = float(c[2])
-            if phase == ControlPhase.LOAD_SHIFT:
-                ds_to_ss_transition_start_time = t
-                foot_positions = [fc["position"] for fc in foot_contacts]
-                if foot_positions:
-                    ds_to_ss_start_xy = np.mean([p[:2] for p in foot_positions], axis=0)
-                else:
-                    ds_to_ss_start_xy = nominal_c_ref[:2].copy()
-                ds_to_ss_end_xy = compute_foot_centroid_xy(robot, locked_support_foot_link)
-            if phase == ControlPhase.SINGLE_SUPPORT:
-                # Override WBC gains to proven direct-single-support values
-                wbc_module.Kp_c = direct_cfg.control.com_kp
-                wbc_module.Kd_c = direct_cfg.control.com_kd
-                wbc_module.Kp_L = direct_cfg.control.momentum_kp
-                wbc_module.Kd_L = direct_cfg.control.momentum_kd
+            (
+                standing_com_z,
+                entry_transition_start_time,
+                entry_start_xy,
+                entry_end_xy,
+                initial_support_contact,
+                support_contact_local_positions,
+                initial_support_yaw,
+            ) = handle_phase_entry(
+                phase,
+                t,
+                c,
+                foot_contacts,
+                nominal_c_ref,
+                robot,
+                locked_support_foot_link,
+                support_foot_link,
+                ss_state,
+                direct_pose,
+                standing_com_z,
+                initial_support_contact,
+                support_contact_local_positions,
+                initial_support_yaw,
+            )
+            if entry_transition_start_time is not None:
+                ds_to_ss_transition_start_time = entry_transition_start_time
+            if entry_start_xy is not None:
+                ds_to_ss_start_xy = entry_start_xy
+            if entry_end_xy is not None:
+                ds_to_ss_end_xy = entry_end_xy
 
-                # Re-initialize corner-patch contact state from current pose
-                support_metrics_now = robot.get_contact_metrics(support_foot_link)
-                initial_support_contact = support_metrics_now["position"].copy()
-                ss_state.filtered_cop_world = np.array(support_metrics_now["cop_position"], copy=True)
-                ss_state.prev_filtered_cop_world = ss_state.filtered_cop_world.copy()
-                ss_state.filtered_support_position_world = np.array(support_metrics_now["position"], copy=True)
-                ss_state.prev_filtered_support_position_world = ss_state.filtered_support_position_world.copy()
-                initial_support_yaw = yaw_from_rotation(
-                    np.array(robot.data.xmat[support_foot_link]).reshape(3, 3)
-                )
-
-                # Anchor CoM z to the actual standing height, not H_COM
-                if standing_com_z is not None and ss_state.com_ref is not None:
-                    ss_state.com_ref[2] = standing_com_z
-
-                # Preserve the achieved handoff posture; later logic can still
-                # blend toward the direct single-support pose progressively.
-                if ss_state.joint_ref is None:
-                    ss_state.joint_ref = direct_pose.copy()
-                ss_state.ready_since = None
-                ss_state.established = False
-
-                # Resolve corner-patch local positions for the locked support foot
-                support_contact_local_positions = resolve_support_contact_local_positions(
-                    robot, support_foot_link, initial_support_contact
-                )
-
-        lock_support = phase in (
-            ControlPhase.LOAD_SHIFT,
-            ControlPhase.PRE_LIFTOFF,
-            ControlPhase.SINGLE_SUPPORT,
-        )
+        lock_support = phase_locks_support(phase)
         if lock_support:
             support_foot_link = locked_support_foot_link
             support_contact = get_contact_entry(foot_contacts, support_foot_link)
@@ -372,10 +499,7 @@ def main() -> None:
             locked_support_foot_link,
             swing_foot_link,
         )
-
-        if phase in (ControlPhase.LOAD_SHIFT, ControlPhase.PRE_LIFTOFF) or (
-            phase == ControlPhase.SINGLE_SUPPORT and not ss_state.established
-        ):
+        if uses_transfer_com_trajectory(phase, ss_state):
             if ds_to_ss_transition_start_time is not None:
                 progress = (t - ds_to_ss_transition_start_time) / ds_to_ss_duration
                 c_ref, c_dot_ref, c_ddot_ref = compute_transition_com_trajectory(
@@ -443,7 +567,6 @@ def main() -> None:
             f_ref = u_ref.copy()
             mpc_force_target = u_ref.copy()
 
-        joint_positions = q[nq_base:]
         joint_velocities = v[nv_base:]
         C_safe = robot.compute_coriolis_gravity(q, v)
         posture_phase = (
