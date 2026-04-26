@@ -56,12 +56,14 @@ class StateEstimator:
         support_foot_link = None
         max_force = 0.0
         for link in self.candidate_foot_links:
-            is_contact, normal_force = self.robot.check_contact(link)
+            contact_metrics = self.robot.get_contact_metrics(link)
+            is_contact = contact_metrics["is_contact"]
+            normal_force = contact_metrics["normal_force"]
             foot_contacts.append({
                 "link": link,
                 "is_contact": is_contact,
                 "normal_force": normal_force,
-                "position": self.robot.get_link_com_position(link),
+                "position": np.array(contact_metrics["position"], copy=True),
             })
             # 选法向力最大的作为支撑足
             if normal_force > max_force:
@@ -84,7 +86,7 @@ class StateEstimator:
         # 首次更新时捕获初始足端位置（机器人已处于起始姿态）
         if self._initial_foot_pos is None:
             self._initial_foot_pos = {
-                link: self.robot.get_link_com_position(link)
+                link: np.array(self.robot.get_contact_metrics(link)["position"], copy=True)
                 for link in self.candidate_foot_links
             }
 

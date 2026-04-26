@@ -28,13 +28,19 @@ from config import (
     INIT_SETTLE_TIME,
     LOAD_SHIFT_TIME,
     PRE_LIFTOFF_TIME,
+    LOAD_SHIFT_SUPPORT_RATIO,
+    PRE_LIFTOFF_SUPPORT_RATIO,
+    SINGLE_SUPPORT_SUPPORT_RATIO,
+    DS_TOTAL_FORCE_XY_WEIGHT,
+    DS_TOTAL_FORCE_Z_WEIGHT,
+    DS_LOAD_DISTRIBUTION_WEIGHT,
 )
 from robot_model import RobotModel
 from robots.unitree_g1 import g1_config
 from state_estimator import StateEstimator
 from mpc import CentroidalMPC
 from wbc import WholeBodyController
-from trajectory import compute_transition_com_trajectory, compute_foot_centroid_xy
+from trajectory import compute_transition_com_trajectory, compute_foot_centroid_xy, smoothstep
 from utils import (
     compute_rmse,
     plot_com_tracking,
@@ -62,7 +68,7 @@ from phase_targets import (
     compute_swing_unload_factor,
 )
 from phases.double_support import check_double_support_transition
-from phases.load_shift import check_load_shift_transition
+from phases.load_shift import check_load_shift_transition, evaluate_load_shift_readiness
 from phases.pre_liftoff import check_pre_liftoff_transition
 from phases.single_support import (
     update_single_support_establishment,
@@ -191,7 +197,10 @@ def main() -> None:
     mpc_f_ref_log = []
     wbc_f_log = []
 
-    initial_foot_pos = {link: robot.get_link_com_position(link) for link in candidate_foot_links}
+    initial_foot_pos = {
+        link: np.array(robot.get_contact_metrics(link)["position"], copy=True)
+        for link in candidate_foot_links
+    }
     locked_support_foot_link = preferred_support_foot_link
     filtered_support_point = initial_foot_pos[preferred_support_foot_link].copy()
     phase = ControlPhase.INIT_SETTLE
@@ -203,6 +212,7 @@ def main() -> None:
         prev_filtered_support_position_world=np.array(initial_support_metrics["position"], copy=True),
     )
     last_wbc_warn_time = -1e9
+    last_load_shift_debug_time = -1e9
     last_valid_support_tau = None
 
     mpc_result = None
@@ -244,6 +254,28 @@ def main() -> None:
         support_foot_link = state["support_foot_link"]
         foot_contacts = state["foot_contacts"]
         load_shift_metrics = state["load_shift_metrics"]
+
+        if phase == ControlPhase.LOAD_SHIFT and t - last_load_shift_debug_time >= 0.10:
+            load_shift_ready, load_shift_checks = evaluate_load_shift_readiness(
+                phase_start_time,
+                t,
+                load_shift_metrics,
+            )
+            unmet_checks = [
+                name for name, passed in load_shift_checks.items() if not passed
+            ]
+            print(
+                f"[LOAD_SHIFT] t={t:.3f}s elapsed={t - phase_start_time:.3f}s "
+                f"ready={load_shift_ready} unmet={unmet_checks or ['none']} "
+                f"support_force={load_shift_metrics.support_force:.1f}N "
+                f"swing_force={load_shift_metrics.swing_force:.1f}N "
+                f"support_ratio={load_shift_metrics.support_ratio:.3f} "
+                f"com_shift={load_shift_metrics.com_shift_ratio:.3f} "
+                f"com_speed={load_shift_metrics.com_speed:.3f} "
+                f"support_slip={load_shift_metrics.support_slip * 1000:.1f}mm "
+                f"swing_slip={load_shift_metrics.swing_slip * 1000:.1f}mm"
+            )
+            last_load_shift_debug_time = t
 
         next_phase = None  # None means hold current phase
         if phase == ControlPhase.INIT_SETTLE:
@@ -311,8 +343,10 @@ def main() -> None:
                 if standing_com_z is not None and ss_state.com_ref is not None:
                     ss_state.com_ref[2] = standing_com_z
 
-                # Use the proven direct-single-support pose as the posture reference
-                ss_state.joint_ref = direct_pose.copy()
+                # Preserve the achieved handoff posture; later logic can still
+                # blend toward the direct single-support pose progressively.
+                if ss_state.joint_ref is None:
+                    ss_state.joint_ref = direct_pose.copy()
                 ss_state.ready_since = None
                 ss_state.established = False
 
@@ -382,7 +416,7 @@ def main() -> None:
         J_c = None
         active_wbc_solver = wbc_ss
         entry_progress = compute_single_support_entry_progress(phase, phase_start_time, t)
-        if phase == ControlPhase.SINGLE_SUPPORT:
+        if phase == ControlPhase.SINGLE_SUPPORT and ss_state.established:
             f_ref, mpc_force_target, wbc_result, active_wbc_solver, J_c, mpc_result = (
                 run_single_support_control(
                     robot,
@@ -432,10 +466,15 @@ def main() -> None:
         joint_positions = q[nq_base:]
         joint_velocities = v[nv_base:]
         C_safe = robot.compute_coriolis_gravity(q, v)
+        posture_phase = (
+            ControlPhase.PRE_LIFTOFF
+            if phase == ControlPhase.SINGLE_SUPPORT and not ss_state.established
+            else phase
+        )
         safe_targets = build_safe_targets(
             initial_dof_angles,
             joint_name_to_dof_idx,
-            phase,
+            posture_phase,
             phase_start_time,
             ss_state.joint_ref,
             t,
@@ -456,7 +495,7 @@ def main() -> None:
             tau_min_limits,
             tau_max_limits,
             swing_leg_dof_indices,
-            phase,
+            posture_phase,
             phase_start_time,
             t,
             load_shift_metrics,
@@ -500,21 +539,51 @@ def main() -> None:
                 total_force = -GRAVITY[2] * robot.total_mass
                 support_force = total_force * 0.5
                 swing_force = total_force * 0.5
-            f_ref_ds[2] = support_force
-            f_ref_ds[6] = swing_force
+            if phase == ControlPhase.LOAD_SHIFT:
+                phase_progress = smoothstep(
+                    (t - phase_start_time) / max(LOAD_SHIFT_TIME, 1e-6)
+                )
+                target_support_ratio = (
+                    (1.0 - phase_progress) * 0.5
+                    + phase_progress * LOAD_SHIFT_SUPPORT_RATIO
+                )
+            else:
+                phase_progress = smoothstep(
+                    (t - phase_start_time) / max(PRE_LIFTOFF_TIME, 1e-6)
+                )
+                target_support_ratio = (
+                    (1.0 - phase_progress) * LOAD_SHIFT_SUPPORT_RATIO
+                    + phase_progress * SINGLE_SUPPORT_SUPPORT_RATIO
+                )
 
             # Force task: total contact force should equal m*(c_ddot_des - g)
             # This prevents the optimizer from using internal v_dot/f cancellation
             # and instead drives the CoM through realizable contact forces.
-            force_task_matrix = np.zeros((3, 8))
+            force_task_matrix = np.zeros((4, 8))
             force_task_matrix[0, 0] = 1.0
             force_task_matrix[0, 4] = 1.0
             force_task_matrix[1, 1] = 1.0
             force_task_matrix[1, 5] = 1.0
             force_task_matrix[2, 2] = 1.0
             force_task_matrix[2, 6] = 1.0
+            force_task_matrix[3, 2] = 1.0
+            force_task_matrix[3, 6] = -1.0
             force_task_ref = robot.total_mass * (c_ddot_des - GRAVITY)
-            force_task_weight = np.array([100.0, 100.0, 10.0])
+            target_total_vertical_force = max(force_task_ref[2], 1e-6)
+            target_support_force = target_support_ratio * target_total_vertical_force
+            target_swing_force = (1.0 - target_support_ratio) * target_total_vertical_force
+            f_ref_ds[2] = target_support_force
+            f_ref_ds[6] = target_swing_force
+            force_task_ref = np.concatenate([
+                force_task_ref,
+                np.array([target_support_force - target_swing_force]),
+            ])
+            force_task_weight = np.array([
+                DS_TOTAL_FORCE_XY_WEIGHT,
+                DS_TOTAL_FORCE_XY_WEIGHT,
+                DS_TOTAL_FORCE_Z_WEIGHT,
+                DS_LOAD_DISTRIBUTION_WEIGHT,
+            ])
 
             wbc_ds_result = wbc_ds.solve(
                 M, C, J_c, Jc_dot,
@@ -534,10 +603,12 @@ def main() -> None:
                     v_dot = wbc_ds_result["v_dot"]
                     tau = wbc_ds_result["tau"]
                     print(
-                        f"[WBC-DS] t={t:.3f}s c_ref={c_ref[:2]} c={c[:2]} "
-                        f"c_ddot_des={c_ddot_des[:2]} "
-                        f"tau_norm={np.linalg.norm(tau):.2f} vdot_norm={np.linalg.norm(v_dot):.1f} "
-                        f"f={f_opt} status={wbc_ds.last_status}"
+                        f"[WBC-DS] t={t:.3f}s c_ref_y={c_ref[1]:.3f} c_y={c[1]:.3f} "
+                        f"target_ratio={target_support_ratio:.3f} "
+                        f"meas_fz=({support_force:.1f},{swing_force:.1f}) "
+                        f"opt_fz=({f_opt[2]:.1f},{f_opt[6]:.1f}) "
+                        f"tau_norm={np.linalg.norm(tau):.2f} "
+                        f"vdot_norm={np.linalg.norm(v_dot):.1f} status={wbc_ds.last_status}"
                     )
             else:
                 applied_tau = safe_tau.copy()

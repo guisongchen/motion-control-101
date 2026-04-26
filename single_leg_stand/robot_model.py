@@ -292,8 +292,8 @@ class RobotModel:
         """Advance the MuJoCo simulation by one step."""
         mujoco.mj_step(self.model, self.data)
 
-    def check_contact(self, link_index: int, other_body_id: int = -1) -> tuple[bool, float]:
-        """Check whether a body is in contact and sum its normal contact force."""
+    def check_contact(self, link_index: int, other_body_id: int = 0) -> tuple[bool, float]:
+        """Check whether a body contacts another body and sum its normal force."""
         is_contact = False
         normal_force = 0.0
         for contact_id in range(self.data.ncon):
@@ -314,7 +314,7 @@ class RobotModel:
 
         return is_contact, normal_force
 
-    def get_contact_metrics(self, link_index: int, other_body_id: int = -1) -> dict:
+    def get_contact_metrics(self, link_index: int, other_body_id: int = 0) -> dict:
         """Aggregate contact centroid and wrench magnitudes for one body."""
         is_contact = False
         normal_force = 0.0

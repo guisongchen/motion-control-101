@@ -384,14 +384,14 @@ def build_safe_targets(
         f"{support_leg}_ankle_pitch_joint",
         f"{support_leg}_hip_roll_joint",
         f"{support_leg}_ankle_roll_joint",
-        f"{swing_leg}_hip_pitch_joint",
-        f"{swing_leg}_knee_joint",
-        f"{swing_leg}_ankle_pitch_joint",
         f"{swing_leg}_hip_roll_joint",
         f"{swing_leg}_ankle_roll_joint",
-        f"{support_leg}_shoulder_pitch_joint",
-        f"{support_leg}_shoulder_roll_joint",
-        f"{support_leg}_elbow_joint",
+        "left_shoulder_pitch_joint",
+        "left_shoulder_roll_joint",
+        "left_elbow_joint",
+        "right_shoulder_pitch_joint",
+        "right_shoulder_roll_joint",
+        "right_elbow_joint",
     ]
 
     if load_shift_progress > 0.0:
