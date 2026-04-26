@@ -60,6 +60,34 @@ def compute_transition_com_trajectory(
     return c_ref, c_dot_ref, c_ddot_ref
 
 
+def build_transition_com_trajectory(
+    start_xy: np.ndarray,
+    end_xy: np.ndarray,
+    duration: float,
+    dt: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Precompute the full smoothstep CoM trajectory on the simulation grid."""
+    num_samples = max(2, int(np.ceil(max(duration, 0.0) / max(dt, 1e-6))) + 1)
+    progress_samples = np.linspace(0.0, 1.0, num_samples)
+
+    c_refs = np.zeros((num_samples, 3))
+    c_dot_refs = np.zeros((num_samples, 3))
+    c_ddot_refs = np.zeros((num_samples, 3))
+
+    for idx, progress in enumerate(progress_samples):
+        c_ref, c_dot_ref, c_ddot_ref = compute_transition_com_trajectory(
+            progress,
+            start_xy,
+            end_xy,
+            duration,
+        )
+        c_refs[idx] = c_ref
+        c_dot_refs[idx] = c_dot_ref
+        c_ddot_refs[idx] = c_ddot_ref
+
+    return c_refs, c_dot_refs, c_ddot_refs
+
+
 def compute_foot_centroid_xy(robot, foot_link: int) -> np.ndarray:
     """World-frame xy centroid of the foot's contact geoms (spheres or box)."""
     import mujoco

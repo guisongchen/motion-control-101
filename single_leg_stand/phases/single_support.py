@@ -71,15 +71,10 @@ def build_single_support_com_ref(
 
 def update_single_support_establishment(
     ss_state: SingleSupportState,
-    phase: ControlPhase,
     t: float,
     load_shift_metrics: LoadShiftMetrics,
 ) -> None:
     """Only enable optimization after one-leg support looks physically established."""
-    if phase != ControlPhase.SINGLE_SUPPORT:
-        ss_state.ready_since = None
-        ss_state.established = False
-        return
     if ss_state.established:
         return
 

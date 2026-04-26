@@ -26,6 +26,7 @@ from config import (
     SINGLE_SUPPORT_MAX_TAU_BLEND,
     SUPPORT_POINT_FILTER,
     INIT_SETTLE_TIME,
+    DOUBLE_SUPPORT_HOLD_RATIO,
     LOAD_SHIFT_TIME,
     PRE_LIFTOFF_TIME,
     LOAD_SHIFT_SUPPORT_RATIO,
@@ -39,7 +40,7 @@ from robots.unitree_g1 import g1_config
 from state_estimator import StateEstimator
 from mpc import CentroidalMPC
 from wbc import WholeBodyController
-from trajectory import compute_transition_com_trajectory, compute_foot_centroid_xy, smoothstep
+from trajectory import build_transition_com_trajectory, compute_foot_centroid_xy, smoothstep
 from utils import (
     compute_rmse,
     plot_com_tracking,
@@ -363,6 +364,11 @@ def main() -> None:
         link: np.array(robot.get_contact_metrics(link)["position"], copy=True)
         for link in candidate_foot_links
     }
+    nominal_c_ref[:2] = np.mean(
+        [initial_foot_pos[link][:2] for link in candidate_foot_links],
+        axis=0,
+    )
+    c_ref = nominal_c_ref.copy()
     locked_support_foot_link = preferred_support_foot_link
     filtered_support_point = initial_foot_pos[preferred_support_foot_link].copy()
     phase = ControlPhase.INIT_SETTLE
@@ -385,6 +391,9 @@ def main() -> None:
     ds_to_ss_start_xy: np.ndarray | None = None
     ds_to_ss_end_xy: np.ndarray | None = None
     ds_to_ss_transition_start_time: float | None = None
+    ds_to_ss_c_ref_samples: np.ndarray | None = None
+    ds_to_ss_c_dot_ref_samples: np.ndarray | None = None
+    ds_to_ss_c_ddot_ref_samples: np.ndarray | None = None
     ds_to_ss_duration = LOAD_SHIFT_TIME + PRE_LIFTOFF_TIME
     standing_com_z: float | None = None
 
@@ -463,6 +472,21 @@ def main() -> None:
                 ds_to_ss_start_xy = entry_start_xy
             if entry_end_xy is not None:
                 ds_to_ss_end_xy = entry_end_xy
+            if (
+                entry_transition_start_time is not None
+                and ds_to_ss_start_xy is not None
+                and ds_to_ss_end_xy is not None
+            ):
+                (
+                    ds_to_ss_c_ref_samples,
+                    ds_to_ss_c_dot_ref_samples,
+                    ds_to_ss_c_ddot_ref_samples,
+                ) = build_transition_com_trajectory(
+                    ds_to_ss_start_xy,
+                    ds_to_ss_end_xy,
+                    ds_to_ss_duration,
+                    DT_SIM,
+                )
 
         lock_support = phase_locks_support(phase)
         if lock_support:
@@ -481,33 +505,49 @@ def main() -> None:
         else:
             p_foot = state["p_foot"]
 
-        if phase in (ControlPhase.INIT_SETTLE, ControlPhase.DOUBLE_SUPPORT_HOLD):
-            foot_positions = [fc["position"] for fc in foot_contacts]
-            if foot_positions:
-                nominal_c_ref[:2] = np.mean([p[:2] for p in foot_positions], axis=0)
-
-        update_single_support_establishment(ss_state, phase, t, load_shift_metrics)
+        if phase == ControlPhase.SINGLE_SUPPORT:
+            update_single_support_establishment(ss_state, t, load_shift_metrics)
 
         c_dot_ref = np.zeros(3)
         c_ddot_ref = np.zeros(3)
 
-        c_ref = compute_phase_com_target(
-            nominal_c_ref,
-            phase,
-            ss_state.com_ref,
-            initial_foot_pos,
-            locked_support_foot_link,
-            swing_foot_link,
-        )
         if uses_transfer_com_trajectory(phase, ss_state):
-            if ds_to_ss_transition_start_time is not None:
-                progress = (t - ds_to_ss_transition_start_time) / ds_to_ss_duration
-                c_ref, c_dot_ref, c_ddot_ref = compute_transition_com_trajectory(
-                    progress,
-                    ds_to_ss_start_xy,
-                    ds_to_ss_end_xy,
-                    ds_to_ss_duration,
+            if (
+                ds_to_ss_transition_start_time is not None
+                and ds_to_ss_c_ref_samples is not None
+                and ds_to_ss_c_dot_ref_samples is not None
+                and ds_to_ss_c_ddot_ref_samples is not None
+            ):
+                trajectory_step = int(
+                    np.clip(
+                        round((t - ds_to_ss_transition_start_time) / DT_SIM),
+                        0,
+                        len(ds_to_ss_c_ref_samples) - 1,
+                    )
                 )
+                c_ref = ds_to_ss_c_ref_samples[trajectory_step].copy()
+                c_dot_ref = ds_to_ss_c_dot_ref_samples[trajectory_step].copy()
+                c_ddot_ref = ds_to_ss_c_ddot_ref_samples[trajectory_step].copy()
+            else:
+                c_ref = compute_phase_com_target(
+                    nominal_c_ref,
+                    phase,
+                    ss_state.com_ref,
+                    initial_foot_pos,
+                    locked_support_foot_link,
+                    swing_foot_link,
+                )
+        elif phase in (ControlPhase.INIT_SETTLE, ControlPhase.DOUBLE_SUPPORT_HOLD):
+            c_ref = nominal_c_ref.copy()
+        else:
+            c_ref = compute_phase_com_target(
+                nominal_c_ref,
+                phase,
+                ss_state.com_ref,
+                initial_foot_pos,
+                locked_support_foot_link,
+                swing_foot_link,
+            )
 
         # Use actual standing CoM height instead of hardcoded H_COM=0.8
         if standing_com_z is not None:
@@ -519,7 +559,6 @@ def main() -> None:
 
         J_c = None
         active_wbc_solver = wbc_ss
-        entry_progress = compute_single_support_entry_progress(phase, phase_start_time, t)
         if phase == ControlPhase.SINGLE_SUPPORT and ss_state.established:
             f_ref, mpc_force_target, wbc_result, active_wbc_solver, J_c, mpc_result = (
                 run_single_support_control(
@@ -604,7 +643,11 @@ def main() -> None:
             load_shift_metrics,
         )
 
-        if phase in (ControlPhase.LOAD_SHIFT, ControlPhase.PRE_LIFTOFF):
+        if phase in (
+            ControlPhase.DOUBLE_SUPPORT_HOLD,
+            ControlPhase.LOAD_SHIFT,
+            ControlPhase.PRE_LIFTOFF,
+        ):
             # Double-support WBC with 4D contacts (3D force + yaw moment)
             # at the box centroid of each foot. This matches MuJoCo's box-plane
             # contact physics better than the old 3D point-contact model.
@@ -642,7 +685,9 @@ def main() -> None:
                 total_force = -GRAVITY[2] * robot.total_mass
                 support_force = total_force * 0.5
                 swing_force = total_force * 0.5
-            if phase == ControlPhase.LOAD_SHIFT:
+            if phase == ControlPhase.DOUBLE_SUPPORT_HOLD:
+                target_support_ratio = DOUBLE_SUPPORT_HOLD_RATIO
+            elif phase == ControlPhase.LOAD_SHIFT:
                 phase_progress = smoothstep(
                     (t - phase_start_time) / max(LOAD_SHIFT_TIME, 1e-6)
                 )
