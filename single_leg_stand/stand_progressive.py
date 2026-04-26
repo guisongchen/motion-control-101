@@ -631,15 +631,20 @@ def main() -> None:
             print(f"  [PL-GATE] elapsed_ok={elapsed_ok} ratio={ratio_ok}({load_shift_metrics.support_ratio:.3f}) speed={speed_ok}({load_shift_metrics.com_speed:.3f}) force={force_ok}({load_shift_metrics.swing_force:.1f}) fb={time_fallback}")
 
         if phase in (PhaseId.DOUBLE_SUPPORT_HOLD, PhaseId.LOAD_SHIFT, PhaseId.PRE_LIFTOFF):
-            # DS WBC with corner-patch contacts per foot (8 contacts x 3D = 24 force DOFs)
-            n_contacts = len(support_contact_locals) + len(swing_contact_locals)
+            # DS WBC with corner-patch contacts per foot
+            # Progressive: drop swing foot from WBC if its normal force is too low
+            swing_force_thresh = 80.0
+            include_swing = swing_force >= swing_force_thresh
+            active_locals = support_contact_locals + (swing_contact_locals if include_swing else [])
+            active_links = [preferred_support_foot_link] * len(support_contact_locals) + ([swing_foot_link] * len(swing_contact_locals) if include_swing else [])
+            n_contacts = len(active_locals)
             wbc_ds = WholeBodyController(robot.nv, num_contacts=n_contacts, contact_dim=3)
 
             M = robot.compute_mass_matrix(q)
             C = robot.compute_coriolis_gravity(q, v)
 
-            all_locals = support_contact_locals + swing_contact_locals
-            all_links = [preferred_support_foot_link] * len(support_contact_locals) + [swing_foot_link] * len(swing_contact_locals)
+            all_locals = active_locals
+            all_links = active_links
 
             J_blocks = []
             for local_pos, link in zip(all_locals, all_links):
@@ -681,11 +686,11 @@ def main() -> None:
             f_ref = np.zeros(3 * n_contacts)
             total_fz = max(-GRAVITY[2] * robot.total_mass, 1e-6)
             n_support = len(support_contact_locals)
-            n_swing = len(swing_contact_locals)
+            n_swing_active = len(swing_contact_locals) if include_swing else 0
             for i in range(n_support):
                 f_ref[3 * i + 2] = target_ratio * total_fz / n_support
-            for i in range(n_swing):
-                f_ref[3 * (n_support + i) + 2] = (1.0 - target_ratio) * total_fz / n_swing
+            for i in range(n_swing_active):
+                f_ref[3 * (n_support + i) + 2] = (1.0 - target_ratio) * total_fz / n_swing_active
 
             wbc_result = wbc_ds.solve(
                 M, C, J_c, Jc_dot,
