@@ -21,7 +21,6 @@ from config import (
     MIN_SUPPORT_FORCE,
     RMSE_THRESH,
     SLIP_THRESH,
-    H_COM,
     NX,
     NU,
 )
@@ -49,7 +48,11 @@ from direct_single_support.primitives import (
     build_corner_patch_wrench_task,
     apply_measured_cop_feedback,
 )
-from utils import compute_rmse, compute_pd_torque, plot_com_tracking
+from utils import compute_rmse, compute_pd_torque, plot_com_tracking, _save_figure
+
+import matplotlib
+matplotlib.use("Agg")  # double-check backend
+import matplotlib.pyplot as plt
 
 import wbc as wbc_module
 
@@ -198,6 +201,7 @@ def build_safe_targets(
     targets = initial_dof_angles.copy()
     cfg = PHASE_CONFIG
     swing_leg = "left" if support_leg == "right" else "right"
+    roll_delta = 0.0
 
     if phase_id >= PhaseId.LOAD_SHIFT:
         ratio_error = max(0.0, cfg["load_shift_target_ratio"] - load_shift_metrics.support_ratio)
@@ -224,7 +228,106 @@ def build_safe_targets(
 
         apply_roll_shift_offset(targets, joint_name_to_dof_idx, support_leg, roll_delta)
 
-    return targets
+    return targets, roll_delta
+
+
+def plot_diagnostics(
+    time_log, com_log, com_ref_log, phase_log, support_ratio_log,
+    foot_force_log, foot_slip_log, cop_y_log, L_log, roll_delta_log,
+    swing_force_log, candidate_foot_links, link_to_foot_name,
+):
+    """Multi-panel diagnostic plot."""
+    time_arr = np.array(time_log)
+    com_arr = np.stack(com_log)
+    com_ref_arr = np.stack(com_ref_log)
+    phase_arr = np.array(phase_log)
+    L_arr = np.stack(L_log)
+    n_phases = max(phase_arr)
+
+    phase_times = []
+    phase_labels = []
+    for p in range(1, n_phases + 1):
+        idx = np.where(phase_arr >= p)[0]
+        if len(idx) > 0:
+            phase_times.append(time_arr[idx[0]])
+            phase_labels.append(PhaseId(p).name)
+
+    fig, axes = plt.subplots(6, 1, figsize=(12, 16), sharex=True)
+
+    # 1. CoM tracking error (y-axis)
+    ax = axes[0]
+    for i, label in enumerate(["x", "y", "z"]):
+        ax.plot(time_arr, com_arr[:, i] - com_ref_arr[:, i], label=label)
+    ax.set_ylabel("CoM error [m]")
+    ax.legend(loc="upper right")
+    ax.grid(True, alpha=0.3)
+    ax.axhline(0, color="k", linewidth=0.5)
+    for pt in phase_times:
+        ax.axvline(pt, color="gray", linestyle="--", alpha=0.4)
+
+    # 2. Support ratio
+    ax = axes[1]
+    ax.plot(time_arr, support_ratio_log, label="support ratio")
+    ax.axhline(0.5, color="gray", linestyle=":", alpha=0.5)
+    ax.set_ylabel("Support ratio")
+    ax.set_ylim(0.4, 1.05)
+    ax.legend(loc="upper right")
+    ax.grid(True, alpha=0.3)
+    for pt in phase_times:
+        ax.axvline(pt, color="gray", linestyle="--", alpha=0.4)
+
+    # 3. Foot normal forces
+    ax = axes[2]
+    for link_id in candidate_foot_links:
+        forces = np.array(foot_force_log[link_id])
+        name = link_to_foot_name.get(link_id, f"link_{link_id}")
+        ax.plot(time_arr, forces, label=name)
+    # Also plot swing_force_log for reference
+    ax.plot(time_arr, swing_force_log, ":", color="magenta", alpha=0.5, label="swing (from metrics)")
+    ax.set_ylabel("Normal force [N]")
+    ax.legend(loc="upper right")
+    ax.grid(True, alpha=0.3)
+    for pt in phase_times:
+        ax.axvline(pt, color="gray", linestyle="--", alpha=0.4)
+
+    # 4. Foot slip
+    ax = axes[3]
+    for link_id in candidate_foot_links:
+        slip = np.array(foot_slip_log[link_id]) * 1000.0
+        name = link_to_foot_name.get(link_id, f"link_{link_id}")
+        ax.plot(time_arr, slip, label=name)
+    ax.set_ylabel("Foot slip [mm]")
+    ax.legend(loc="upper right")
+    ax.grid(True, alpha=0.3)
+    for pt in phase_times:
+        ax.axvline(pt, color="gray", linestyle="--", alpha=0.4)
+
+    # 5. Roll delta
+    ax = axes[4]
+    ax.plot(time_arr, roll_delta_log)
+    ax.set_ylabel("Roll delta [rad]")
+    ax.grid(True, alpha=0.3)
+    for pt in phase_times:
+        ax.axvline(pt, color="gray", linestyle="--", alpha=0.4)
+
+    # 6. CoP y + Angular momentum
+    ax = axes[5]
+    ax.plot(time_arr, cop_y_log, label="CoP y")
+    ax.set_ylabel("CoP y [m]")
+    ax.legend(loc="upper left")
+    for pt in phase_times:
+        ax.axvline(pt, color="gray", linestyle="--", alpha=0.4)
+    ax_twin = ax.twinx()
+    ax_twin.plot(time_arr, L_arr[:, 0], "--", alpha=0.5, label="L_x")
+    ax_twin.plot(time_arr, L_arr[:, 1], "--", alpha=0.5, label="L_y")
+    ax_twin.set_ylabel("Angular momentum")
+    ax_twin.legend(loc="upper right")
+    ax.grid(True, alpha=0.3)
+
+    axes[-1].set_xlabel("Time [s]")
+    fig.suptitle("Diagnostics")
+    plt.tight_layout()
+    _save_figure(fig, "diagnostics.png")
 
 
 def main() -> None:
@@ -254,6 +357,7 @@ def main() -> None:
         if joint_name in g1_config.standing_joint_angles:
             initial_dof_angles[idx] = g1_config.standing_joint_angles[joint_name]
     robot.reset_joint_positions(initial_dof_angles)
+    measured_com_z = float(robot.compute_com_position()[2])
 
     tau_max_limits = robot.tau_limits.copy()
     tau_min_limits = -tau_max_limits
@@ -271,7 +375,7 @@ def main() -> None:
         for link in candidate_foot_links
     }
     nominal_c_ref = np.zeros(3)
-    nominal_c_ref[2] = H_COM
+    nominal_c_ref[2] = measured_com_z
     nominal_c_ref[:2] = np.mean(
         [initial_foot_pos[link][:2] for link in candidate_foot_links], axis=0
     )
@@ -288,7 +392,7 @@ def main() -> None:
     mpc = CentroidalMPC()
     wbc_ss = WholeBodyController(robot.nv, num_contacts=4, contact_dim=3)
     x_ref = np.zeros(NX)
-    x_ref[2] = H_COM
+    x_ref[2] = measured_com_z
     u_ref = np.zeros(NU)
     u_ref[2] = -GRAVITY[2] * robot.total_mass
     mpc.set_reference(x_ref, u_ref)
@@ -317,6 +421,11 @@ def main() -> None:
     support_ratio_log = []
     phase_log = []
     foot_force_log = {link: [] for link in candidate_foot_links}
+    foot_slip_log = {link: [] for link in candidate_foot_links}
+    cop_y_log = []
+    L_log = []
+    roll_delta_log = []
+    swing_force_log = []
 
     phase = PhaseId.INIT_SETTLE
     phase_start_time = 0.0
@@ -324,7 +433,7 @@ def main() -> None:
     ls_gate = StabilityGate()
     pl_gate = StabilityGate()
     c_ref = nominal_c_ref.copy()
-    standing_com_z = None
+    standing_com_z = measured_com_z
 
     print(f"\n===== Phase Experiment (duration={cfg['sim_duration']:.1f}s) =====")
     print(f"Support: {support_leg}, Swing: {swing_leg}")
@@ -453,7 +562,7 @@ def main() -> None:
 
         # --- Compute safe_tau (PD posture + C_bias) ---
         C_safe = robot.compute_coriolis_gravity(q, v)
-        safe_targets = build_safe_targets(
+        safe_targets, roll_delta = build_safe_targets(
             initial_dof_angles, joint_name_to_dof_idx, phase, phase_start_time, t,
             support_leg, load_shift_metrics,
         )
@@ -719,6 +828,19 @@ def main() -> None:
             link = fc["link"]
             foot_force_log[link].append(fc["normal_force"])
 
+        for link in candidate_foot_links:
+            current_pos = robot.get_contact_metrics(link)["position"]
+            foot_slip_log[link].append(
+                float(np.linalg.norm(current_pos[:2] - initial_foot_pos[link][:2]))
+            )
+
+        support_cop = robot.get_contact_metrics(preferred_support_foot_link)
+        cop_y_log.append(float(support_cop["cop_position"][1]))
+
+        L_log.append(state["L"].copy())
+        roll_delta_log.append(roll_delta)
+        swing_force_log.append(load_shift_metrics.swing_force)
+
         # --- Periodic diagnostics ---
         if step % 500 == 0:
             phase_name = PhaseId(phase).name
@@ -777,6 +899,13 @@ def main() -> None:
             print(f"  PRE_LIFTOFF max ratio: {max(pl_ratios):.3f}, mean: {np.mean(pl_ratios):.3f}")
 
     plot_com_tracking(time_log, com_log, com_ref_log)
+
+    plot_diagnostics(
+        time_log, com_log, com_ref_log, phase_log,
+        support_ratio_log, foot_force_log, foot_slip_log,
+        cop_y_log, L_log, roll_delta_log, swing_force_log,
+        candidate_foot_links, robot.link_to_foot_name,
+    )
 
 
 if __name__ == "__main__":
