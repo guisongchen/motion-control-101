@@ -20,20 +20,39 @@ def _save_figure(fig: plt.Figure, filename: str):
     plt.close(fig)
 
 
-def build_friction_cone_matrix(mu: float) -> tuple:
+def build_friction_cone_matrix(mu: float, gamma: float = 0.0) -> tuple:
     """
-    构造 4 面线性摩擦锥的约束矩阵 A_fcon 和边界 b_fcon。
-    约束形式: A_fcon @ f <= b_fcon
+    构造线性摩擦锥的约束矩阵 A_fcon 和边界 b_fcon。
+
+    当 gamma == 0 时，返回 3D 版本 (f = [fx, fy, fz])，4 个不等式，
+    兼容 MPC 等使用 3D 接触力的代码。
+
+    当 gamma > 0 时，返回 4D 版本 (f = [fx, fy, fz, mz])，6 个不等式：
+      |f_x| <= mu * f_z     -> 2 个
+      |f_y| <= mu * f_z     -> 2 个
+      |m_z| <= gamma * f_z  -> 2 个
     """
-    # |f_x| <= mu * f_z  ->  f_x - mu * f_z <= 0, -f_x - mu * f_z <= 0
-    # |f_y| <= mu * f_z  ->  f_y - mu * f_z <= 0, -f_y - mu * f_z <= 0
+    if gamma <= 0.0:
+        # 3D 摩擦锥 (兼容 MPC)
+        A_fcon = np.array([
+            [1.0,  0.0, -mu],
+            [-1.0, 0.0, -mu],
+            [0.0,  1.0, -mu],
+            [0.0, -1.0, -mu],
+        ])
+        b_fcon = np.zeros(4)
+        return A_fcon, b_fcon
+
+    # 4D 摩擦锥 (WBC 用)
     A_fcon = np.array([
-        [1.0,  0.0, -mu],
-        [-1.0, 0.0, -mu],
-        [0.0,  1.0, -mu],
-        [0.0, -1.0, -mu],
+        [1.0,  0.0, -mu,    0.0],
+        [-1.0, 0.0, -mu,    0.0],
+        [0.0,  1.0, -mu,    0.0],
+        [0.0, -1.0, -mu,    0.0],
+        [0.0,  0.0, -gamma, 1.0],
+        [0.0,  0.0, -gamma, -1.0],
     ])
-    b_fcon = np.zeros(4)
+    b_fcon = np.zeros(6)
     return A_fcon, b_fcon
 
 

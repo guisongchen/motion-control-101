@@ -35,6 +35,12 @@ def check_load_shift_transition(
         and load_shift_metrics.support_slip <= SLIP_THRESH
         and load_shift_metrics.swing_slip <= SLIP_THRESH
     )
+    print(f"[DEBUG] t={t:.3f} elapsed={elapsed:.3f} ready={load_shift_ready} "
+          f"support_ratio={load_shift_metrics.support_ratio:.2f} "
+          f"com_shift={load_shift_metrics.com_shift_ratio:.2f} "
+          f"force={load_shift_metrics.support_force:.0f} "
+          f"speed={load_shift_metrics.com_speed:.2f} "
+          f"slip={load_shift_metrics.support_slip*1000:.1f}mm")
     if _load_shift_gate.check(load_shift_ready, t, LOAD_SHIFT_READY_TIME):
         return ControlPhase.PRE_LIFTOFF
     return None

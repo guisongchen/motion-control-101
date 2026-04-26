@@ -7,7 +7,6 @@ import numpy as np
 
 from config import (
     DT_SIM,
-    H_COM,
     MIN_SUPPORT_FORCE,
     SINGLE_SUPPORT_ESTABLISH_SUPPORT_RATIO,
     SINGLE_SUPPORT_ESTABLISH_SWING_FORCE_MAX,
@@ -45,22 +44,29 @@ def build_single_support_com_ref(
     body_rotation = np.array(robot.data.xmat[support_foot_link]).reshape(3, 3)
 
     corners: list[np.ndarray] = []
+    has_box = False
+    box_local_pos = None
     for geom_id in range(robot.model.ngeom):
         if int(robot.model.geom_bodyid[geom_id]) != support_foot_link:
             continue
-        if int(robot.model.geom_type[geom_id]) != mujoco.mjtGeom.mjGEOM_SPHERE:
-            continue
-        local_pos = np.array(robot.model.geom_pos[geom_id], copy=True)
-        world_pos = body_origin + body_rotation @ local_pos
-        corners.append(world_pos)
+        geom_type = int(robot.model.geom_type[geom_id])
+        if geom_type == mujoco.mjtGeom.mjGEOM_SPHERE:
+            local_pos = np.array(robot.model.geom_pos[geom_id], copy=True)
+            world_pos = body_origin + body_rotation @ local_pos
+            corners.append(world_pos)
+        elif geom_type == mujoco.mjtGeom.mjGEOM_BOX:
+            has_box = True
+            box_local_pos = np.array(robot.model.geom_pos[geom_id], copy=True)
 
     c_ref = np.zeros(3)
-    if corners:
+    if has_box and box_local_pos is not None:
+        centroid_world = body_origin + body_rotation @ box_local_pos
+        c_ref[:2] = centroid_world[:2]
+    elif corners:
         centroid = np.mean(corners, axis=0)
         c_ref[:2] = centroid[:2]
     else:
         c_ref[:2] = body_origin[:2]
-    c_ref[2] = H_COM
     return c_ref
 
 

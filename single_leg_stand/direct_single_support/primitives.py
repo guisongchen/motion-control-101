@@ -78,15 +78,34 @@ def resolve_support_contact_local_positions(
         return [body_rotation.T @ (initial_support_contact - body_origin)]
     if mode == "corner_patch":
         local_positions: list[np.ndarray] = []
+        has_box = False
+        box_local_pos = None
+        box_size = None
         for geom_id in range(robot.model.ngeom):
             if int(robot.model.geom_bodyid[geom_id]) != support_link:
                 continue
-            if int(robot.model.geom_type[geom_id]) != mujoco.mjtGeom.mjGEOM_SPHERE:
-                continue
-            local_positions.append(np.array(robot.model.geom_pos[geom_id], copy=True))
+            geom_type = int(robot.model.geom_type[geom_id])
+            if geom_type == mujoco.mjtGeom.mjGEOM_SPHERE:
+                local_positions.append(np.array(robot.model.geom_pos[geom_id], copy=True))
+            elif geom_type == mujoco.mjtGeom.mjGEOM_BOX:
+                has_box = True
+                box_local_pos = np.array(robot.model.geom_pos[geom_id], copy=True)
+                box_size = np.array(robot.model.geom_size[geom_id], copy=True)
+        if has_box and box_local_pos is not None and box_size is not None:
+            # Compute 4 bottom-face corners from box half-extents
+            hx, hy, hz = box_size
+            cx, cy, cz = box_local_pos
+            # Bottom face at cz - hz
+            corners_local = [
+                np.array([cx - hx, cy - hy, cz - hz]),
+                np.array([cx - hx, cy + hy, cz - hz]),
+                np.array([cx + hx, cy - hy, cz - hz]),
+                np.array([cx + hx, cy + hy, cz - hz]),
+            ]
+            return sorted(corners_local, key=lambda pos: (pos[0], pos[1]))
         if not local_positions:
             raise ValueError(
-                f"No corner-patch sphere geoms found on support body {support_link}."
+                f"No corner-patch contact geoms found on support body {support_link}."
             )
         return sorted(local_positions, key=lambda pos: (pos[0], pos[1]))
     raise ValueError(f"Unsupported direct single-support contact point mode: {mode}")

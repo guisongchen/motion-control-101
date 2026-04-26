@@ -71,10 +71,13 @@ from phases.single_support import (
 
 # Re-use proven single-support control primitives from direct_single_support benchmark
 from direct_single_support import (
+    build_direct_pose,
     resolve_support_contact_local_positions,
     yaw_from_rotation,
     DIRECT_SINGLE_SUPPORT_CONFIG as direct_cfg,
 )
+
+import wbc as wbc_module
 
 
 def main() -> None:
@@ -108,9 +111,22 @@ def main() -> None:
     ]
 
     mpc = CentroidalMPC()
-    wbc_ss = WholeBodyController(robot.nv, num_contacts=4)
-    wbc_ss_with_swing = WholeBodyController(robot.nv, num_contacts=5)
-    wbc_ds = WholeBodyController(robot.nv, num_contacts=2)
+    wbc_ss = WholeBodyController(robot.nv, num_contacts=4, contact_dim=3)
+    wbc_ss_with_swing = WholeBodyController(robot.nv, num_contacts=5, contact_dim=3)
+    # Pre-parse corner-patch contact points for both feet (double-support WBC)
+    ds_support_contact_locals = resolve_support_contact_local_positions(
+        robot, preferred_support_foot_link, np.zeros(3)
+    )
+    ds_swing_contact_locals = resolve_support_contact_local_positions(
+        robot, swing_foot_link, np.zeros(3)
+    )
+    # Use a single centroid contact per foot for double-support WBC.
+    # Four corner constraints lock foot orientation and prevent ankle roll,
+    # which makes CoM weight transfer impossible. A centroid contact allows
+    # roll/pitch while still constraining translation at the correct ground point.
+    ds_support_centroid_local = np.mean(ds_support_contact_locals, axis=0)
+    ds_swing_centroid_local = np.mean(ds_swing_contact_locals, axis=0)
+    wbc_ds = WholeBodyController(robot.nv, num_contacts=2, contact_dim=4)
 
     # Pre-parse corner-patch contact points for the preferred support foot
     initial_support_metrics = robot.get_contact_metrics(preferred_support_foot_link)
@@ -119,8 +135,16 @@ def main() -> None:
         robot, preferred_support_foot_link, initial_support_contact
     )
 
-    # Single-support WBC gain override (same as direct_single_support.py)
-    import wbc as wbc_module
+    # Override default WBC gains to proven direct-single-support values
+    # (the config defaults of Kp_c=100 are too aggressive and cause instability)
+    wbc_module.Kp_c = direct_cfg.control.com_kp
+    wbc_module.Kd_c = direct_cfg.control.com_kd
+    wbc_module.Kp_L = direct_cfg.control.momentum_kp
+    wbc_module.Kd_L = direct_cfg.control.momentum_kd
+
+    # Proven single-support pose from the direct benchmark (used as reference
+    # during PRE_LIFTOFF blending and SINGLE_SUPPORT initial posture)
+    direct_pose = build_direct_pose(robot.dof_joint_names, support_leg)
 
     # Single-support geometry (activated in SINGLE_SUPPORT)
     initial_support_yaw = yaw_from_rotation(
@@ -191,6 +215,7 @@ def main() -> None:
     ds_to_ss_end_xy: np.ndarray | None = None
     ds_to_ss_transition_start_time: float | None = None
     ds_to_ss_duration = LOAD_SHIFT_TIME + PRE_LIFTOFF_TIME
+    standing_com_z: float | None = None
 
     print("\n===== 开始仿真（MuJoCo 单足站立测试模式）=====")
     print(f"总质量: {robot.total_mass:.2f} kg")
@@ -254,6 +279,8 @@ def main() -> None:
             phase = next_phase
             phase_start_time = t
             print(f"[INFO] t={t:.3f}s 进入阶段: {phase.name}")
+            if phase == ControlPhase.DOUBLE_SUPPORT_HOLD:
+                standing_com_z = float(c[2])
             if phase == ControlPhase.LOAD_SHIFT:
                 ds_to_ss_transition_start_time = t
                 foot_positions = [fc["position"] for fc in foot_contacts]
@@ -279,6 +306,15 @@ def main() -> None:
                 initial_support_yaw = yaw_from_rotation(
                     np.array(robot.data.xmat[support_foot_link]).reshape(3, 3)
                 )
+
+                # Anchor CoM z to the actual standing height, not H_COM
+                if standing_com_z is not None and ss_state.com_ref is not None:
+                    ss_state.com_ref[2] = standing_com_z
+
+                # Use the proven direct-single-support pose as the posture reference
+                ss_state.joint_ref = direct_pose.copy()
+                ss_state.ready_since = None
+                ss_state.established = False
 
                 # Resolve corner-patch local positions for the locked support foot
                 support_contact_local_positions = resolve_support_contact_local_positions(
@@ -334,6 +370,10 @@ def main() -> None:
                     ds_to_ss_end_xy,
                     ds_to_ss_duration,
                 )
+
+        # Use actual standing CoM height instead of hardcoded H_COM=0.8
+        if standing_com_z is not None:
+            c_ref[2] = standing_com_z
 
         x_ref[:3] = c_ref
         x_ref[3:6] = c_dot_ref
@@ -405,6 +445,7 @@ def main() -> None:
             c_dot,
             c_ref,
             load_shift_metrics,
+            optimized_joint_angles=direct_pose,
         )
         safe_tau = compute_safe_tau(
             initial_dof_angles,
@@ -422,12 +463,19 @@ def main() -> None:
         )
 
         if phase in (ControlPhase.LOAD_SHIFT, ControlPhase.PRE_LIFTOFF):
+            # Double-support WBC with 4D contacts (3D force + yaw moment)
+            # at the box centroid of each foot. This matches MuJoCo's box-plane
+            # contact physics better than the old 3D point-contact model.
             M = robot.compute_mass_matrix(q)
             C = robot.compute_coriolis_gravity(q, v)
-            J_support = robot.get_foot_jacobian(locked_support_foot_link, q)
-            J_swing = robot.get_foot_jacobian(swing_foot_link, q)
-            J_c_ds = np.vstack([J_support, J_swing])
-            Jc_dot_ds = np.zeros_like(J_c_ds)
+            J_c_support = robot.get_foot_jacobian(
+                preferred_support_foot_link, q, local_position=ds_support_centroid_local
+            )
+            J_c_swing = robot.get_foot_jacobian(
+                swing_foot_link, q, local_position=ds_swing_centroid_local
+            )
+            J_c = np.vstack([J_c_support, J_c_swing])
+            Jc_dot = np.zeros_like(J_c)
             J_com = robot.get_com_jacobian(q)
             J_L = robot.get_angular_momentum_jacobian(q)
 
@@ -438,33 +486,67 @@ def main() -> None:
                 L_ref, L, L_dot_ref, np.zeros(3)
             )
 
-            total_weight = -GRAVITY[2] * robot.total_mass
-            f_ref_ds = np.array(
-                [0.0, 0.0, total_weight / 2.0, 0.0, 0.0, total_weight / 2.0]
-            )
+            # Build 4D force reference for 2 contacts: [fx, fy, fz, mz] per foot
+            f_ref_ds = np.zeros(8)
+            support_force = 0.0
+            swing_force = 0.0
+            for fc in foot_contacts:
+                if fc["link"] == preferred_support_foot_link:
+                    support_force = fc["normal_force"]
+                elif fc["link"] == swing_foot_link:
+                    swing_force = fc["normal_force"]
+            total_force = support_force + swing_force
+            if total_force < 10.0:
+                total_force = -GRAVITY[2] * robot.total_mass
+                support_force = total_force * 0.5
+                swing_force = total_force * 0.5
+            f_ref_ds[2] = support_force
+            f_ref_ds[6] = swing_force
+
+            # Force task: total contact force should equal m*(c_ddot_des - g)
+            # This prevents the optimizer from using internal v_dot/f cancellation
+            # and instead drives the CoM through realizable contact forces.
+            force_task_matrix = np.zeros((3, 8))
+            force_task_matrix[0, 0] = 1.0
+            force_task_matrix[0, 4] = 1.0
+            force_task_matrix[1, 1] = 1.0
+            force_task_matrix[1, 5] = 1.0
+            force_task_matrix[2, 2] = 1.0
+            force_task_matrix[2, 6] = 1.0
+            force_task_ref = robot.total_mass * (c_ddot_des - GRAVITY)
+            force_task_weight = np.array([100.0, 100.0, 10.0])
 
             wbc_ds_result = wbc_ds.solve(
-                M,
-                C,
-                J_c_ds,
-                Jc_dot_ds,
-                J_com,
-                J_L,
-                c_ddot_des,
-                L_dot_des,
-                f_ref_ds,
-                v,
-                tau_min_limits,
-                tau_max_limits,
+                M, C, J_c, Jc_dot,
+                J_com, J_L,
+                c_ddot_des, L_dot_des,
+                f_ref_ds, v,
+                tau_min_limits, tau_max_limits,
+                force_task_matrix=force_task_matrix,
+                force_task_ref=force_task_ref,
+                force_task_weight=force_task_weight,
             )
-
             if wbc_ds_result is not None:
-                applied_tau = wbc_ds_result["tau"]
+                applied_tau = wbc_ds_result["tau"].copy()
                 wbc_result = wbc_ds_result
-                robot.set_joint_torques(applied_tau)
+                if step % 100 == 0:
+                    f_opt = wbc_ds_result["f"]
+                    v_dot = wbc_ds_result["v_dot"]
+                    tau = wbc_ds_result["tau"]
+                    print(
+                        f"[WBC-DS] t={t:.3f}s c_ref={c_ref[:2]} c={c[:2]} "
+                        f"c_ddot_des={c_ddot_des[:2]} "
+                        f"tau_norm={np.linalg.norm(tau):.2f} vdot_norm={np.linalg.norm(v_dot):.1f} "
+                        f"f={f_opt} status={wbc_ds.last_status}"
+                    )
             else:
                 applied_tau = safe_tau.copy()
-                robot.set_joint_torques(applied_tau)
+                if t - last_wbc_warn_time >= 0.25:
+                    print(
+                        f"[WARN] t={t:.3f}s double-support WBC failed, using safe_tau fallback"
+                    )
+                    last_wbc_warn_time = t
+            robot.set_joint_torques(applied_tau)
         elif phase != ControlPhase.SINGLE_SUPPORT:
             applied_tau = safe_tau.copy()
             robot.set_joint_torques(applied_tau)
@@ -555,16 +637,21 @@ def main() -> None:
         tau_log.append(applied_tau.copy())
         if wbc_result is not None:
             f_opt = wbc_result["f"]
-            if f_opt.shape[0] % 3 == 0:
-                f_aggregate = np.zeros(3)
+            cd = wbc_result.get("contact_dim", 3)
+            f_aggregate = np.zeros(3)
+            if cd == 4 and f_opt.shape[0] % 4 == 0:
+                for i in range(f_opt.shape[0] // 4):
+                    f_aggregate += f_opt[4 * i : 4 * i + 3]
+            elif f_opt.shape[0] % 3 == 0:
                 for i in range(f_opt.shape[0] // 3):
                     f_aggregate += f_opt[3 * i : 3 * i + 3]
-                wbc_f_log.append(f_aggregate)
             else:
-                wbc_f_log.append(f_opt.copy())
+                f_aggregate = f_opt[:3].copy()
+            wbc_f_log.append(f_aggregate)
             wbc_time_log.append(wbc_result["solve_time"])
         else:
             wbc_f_log.append(np.zeros(3))
+            wbc_time_log.append(0.0)
 
         if mpc_result is not None:
             mpc_f_ref_log.append(f_ref.copy())

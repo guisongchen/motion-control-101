@@ -4,9 +4,6 @@ from __future__ import annotations
 
 import numpy as np
 
-from config import H_COM
-
-
 def smoothstep(t: float) -> float:
     """C1-continuous smoothstep: 3t^2 - 2t^3."""
     t = float(np.clip(t, 0.0, 1.0))
@@ -51,7 +48,6 @@ def compute_transition_com_trajectory(
 
     c_ref = np.zeros(3)
     c_ref[:2] = (1.0 - s) * np.asarray(start_xy, dtype=float) + s * np.asarray(end_xy, dtype=float)
-    c_ref[2] = H_COM
 
     delta_xy = np.asarray(end_xy, dtype=float) - np.asarray(start_xy, dtype=float)
 
@@ -65,20 +61,31 @@ def compute_transition_com_trajectory(
 
 
 def compute_foot_centroid_xy(robot, foot_link: int) -> np.ndarray:
-    """World-frame xy centroid of the foot's corner sphere geoms."""
+    """World-frame xy centroid of the foot's contact geoms (spheres or box)."""
     import mujoco
 
     body_origin = np.array(robot.data.xpos[foot_link], copy=True)
     body_rotation = np.array(robot.data.xmat[foot_link]).reshape(3, 3)
     corners: list[np.ndarray] = []
+    has_box = False
+    box_local_pos = None
+    box_size = None
     for geom_id in range(robot.model.ngeom):
         if int(robot.model.geom_bodyid[geom_id]) != foot_link:
             continue
-        if int(robot.model.geom_type[geom_id]) != mujoco.mjtGeom.mjGEOM_SPHERE:
-            continue
-        local_pos = np.array(robot.model.geom_pos[geom_id], copy=True)
-        world_pos = body_origin + body_rotation @ local_pos
-        corners.append(world_pos[:2])
+        geom_type = int(robot.model.geom_type[geom_id])
+        if geom_type == mujoco.mjtGeom.mjGEOM_SPHERE:
+            local_pos = np.array(robot.model.geom_pos[geom_id], copy=True)
+            world_pos = body_origin + body_rotation @ local_pos
+            corners.append(world_pos[:2])
+        elif geom_type == mujoco.mjtGeom.mjGEOM_BOX:
+            has_box = True
+            box_local_pos = np.array(robot.model.geom_pos[geom_id], copy=True)
+            box_size = np.array(robot.model.geom_size[geom_id], copy=True)
+    if has_box and box_local_pos is not None and box_size is not None:
+        # Box centroid in world xy
+        world_pos = body_origin + body_rotation @ box_local_pos
+        return world_pos[:2]
     if corners:
         return np.mean(corners, axis=0)
     return body_origin[:2]

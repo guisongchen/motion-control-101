@@ -23,18 +23,36 @@ _double_support_gate = StabilityGate()
 
 
 def _foot_corners_world_xy(robot: RobotModel, link: int) -> list[np.ndarray]:
-    """World-frame xy positions of the four corner sphere geoms on a foot body."""
+    """World-frame xy positions of the foot contact-patch corners (spheres or box)."""
     body_origin = np.array(robot.data.xpos[link], copy=True)
     body_rotation = np.array(robot.data.xmat[link]).reshape(3, 3)
     corners: list[np.ndarray] = []
+    has_box = False
+    box_local_pos = None
+    box_size = None
     for geom_id in range(robot.model.ngeom):
         if int(robot.model.geom_bodyid[geom_id]) != link:
             continue
-        if int(robot.model.geom_type[geom_id]) != mujoco.mjtGeom.mjGEOM_SPHERE:
-            continue
-        local_pos = np.array(robot.model.geom_pos[geom_id], copy=True)
-        world_pos = body_origin + body_rotation @ local_pos
-        corners.append(world_pos[:2])
+        geom_type = int(robot.model.geom_type[geom_id])
+        if geom_type == mujoco.mjtGeom.mjGEOM_SPHERE:
+            local_pos = np.array(robot.model.geom_pos[geom_id], copy=True)
+            world_pos = body_origin + body_rotation @ local_pos
+            corners.append(world_pos[:2])
+        elif geom_type == mujoco.mjtGeom.mjGEOM_BOX:
+            has_box = True
+            box_local_pos = np.array(robot.model.geom_pos[geom_id], copy=True)
+            box_size = np.array(robot.model.geom_size[geom_id], copy=True)
+    if has_box and box_local_pos is not None and box_size is not None:
+        hx, hy, _hz = box_size
+        cx, cy, cz = box_local_pos
+        # Bottom-face corners in local frame
+        local_corners = [
+            np.array([cx - hx, cy - hy, cz - _hz]),
+            np.array([cx - hx, cy + hy, cz - _hz]),
+            np.array([cx + hx, cy - hy, cz - _hz]),
+            np.array([cx + hx, cy + hy, cz - _hz]),
+        ]
+        return [(body_rotation @ lc)[:2] for lc in local_corners]
     return corners
 
 
