@@ -29,7 +29,6 @@ from config import (
     LOAD_SHIFT_TIME,
     PRE_LIFTOFF_TIME,
     LOAD_SHIFT_SUPPORT_RATIO,
-    PRE_LIFTOFF_SUPPORT_RATIO,
     SINGLE_SUPPORT_SUPPORT_RATIO,
     DS_TOTAL_FORCE_XY_WEIGHT,
     DS_TOTAL_FORCE_Z_WEIGHT,
@@ -58,7 +57,6 @@ from phase_core import (
     ControlMemory,
     get_contact_entry,
     support_name,
-    format_vector,
     compute_phase_com_target,
 )
 from phase_targets import (
@@ -68,7 +66,7 @@ from phase_targets import (
     compute_swing_unload_factor,
 )
 from phases.double_support import check_double_support_transition
-from phases.load_shift import check_load_shift_transition, evaluate_load_shift_readiness
+from phases.load_shift import evaluate_load_shift_readiness
 from phases.pre_liftoff import check_pre_liftoff_transition
 from phases.single_support import (
     update_single_support_establishment,
@@ -212,7 +210,6 @@ def main() -> None:
         prev_filtered_support_position_world=np.array(initial_support_metrics["position"], copy=True),
     )
     last_wbc_warn_time = -1e9
-    last_load_shift_debug_time = -1e9
     last_valid_support_tau = None
 
     mpc_result = None
@@ -254,32 +251,11 @@ def main() -> None:
         support_foot_link = state["support_foot_link"]
         foot_contacts = state["foot_contacts"]
         load_shift_metrics = state["load_shift_metrics"]
-
-        if phase == ControlPhase.LOAD_SHIFT and t - last_load_shift_debug_time >= 0.10:
-            load_shift_ready, load_shift_checks = evaluate_load_shift_readiness(
-                phase_start_time,
-                t,
-                load_shift_metrics,
-            )
-            unmet_checks = [
-                name for name, passed in load_shift_checks.items() if not passed
-            ]
-            print(
-                f"[LOAD_SHIFT] t={t:.3f}s elapsed={t - phase_start_time:.3f}s "
-                f"ready={load_shift_ready} unmet={unmet_checks or ['none']} "
-                f"support_force={load_shift_metrics.support_force:.1f}N "
-                f"swing_force={load_shift_metrics.swing_force:.1f}N "
-                f"support_ratio={load_shift_metrics.support_ratio:.3f} "
-                f"com_shift={load_shift_metrics.com_shift_ratio:.3f} "
-                f"com_speed={load_shift_metrics.com_speed:.3f} "
-                f"support_slip={load_shift_metrics.support_slip * 1000:.1f}mm "
-                f"swing_slip={load_shift_metrics.swing_slip * 1000:.1f}mm"
-            )
-            last_load_shift_debug_time = t
+        elapsed = t - phase_start_time
 
         next_phase = None  # None means hold current phase
         if phase == ControlPhase.INIT_SETTLE:
-            if t - phase_start_time >= INIT_SETTLE_TIME:
+            if elapsed >= INIT_SETTLE_TIME:
                 next_phase = ControlPhase.DOUBLE_SUPPORT_HOLD
         elif phase == ControlPhase.DOUBLE_SUPPORT_HOLD:
             next_phase = check_double_support_transition(
@@ -290,14 +266,16 @@ def main() -> None:
                 robot,
             )
         elif phase == ControlPhase.LOAD_SHIFT:
-            next_phase = check_load_shift_transition(
-                phase_start_time, t, state
+            load_shift_ready, _load_shift_checks = evaluate_load_shift_readiness(
+                elapsed,
+                load_shift_metrics,
             )
+            if load_shift_ready:
+                next_phase = ControlPhase.PRE_LIFTOFF
         elif phase == ControlPhase.PRE_LIFTOFF:
             next_phase = check_pre_liftoff_transition(
-                phase_start_time,
+                elapsed,
                 ss_state,
-                t,
                 state,
                 c_ref,
                 swing_foot_link,
@@ -557,14 +535,6 @@ def main() -> None:
                     (1.0 - phase_progress) * LOAD_SHIFT_SUPPORT_RATIO
                     + phase_progress * SINGLE_SUPPORT_SUPPORT_RATIO
                 )
-            else:
-                phase_progress = smoothstep(
-                    (t - phase_start_time) / max(SINGLE_SUPPORT_ENTRY_TIME, 1e-6)
-                )
-                target_support_ratio = (
-                    (1.0 - phase_progress) * PRE_LIFTOFF_SUPPORT_RATIO
-                    + phase_progress * SINGLE_SUPPORT_SUPPORT_RATIO
-                )
 
             # Force task: total contact force should equal m*(c_ddot_des - g)
             # This prevents the optimizer from using internal v_dot/f cancellation
@@ -608,18 +578,6 @@ def main() -> None:
             if wbc_ds_result is not None:
                 applied_tau = wbc_ds_result["tau"].copy()
                 wbc_result = wbc_ds_result
-                if step % 100 == 0:
-                    f_opt = wbc_ds_result["f"]
-                    v_dot = wbc_ds_result["v_dot"]
-                    tau = wbc_ds_result["tau"]
-                    print(
-                        f"[WBC-DS] t={t:.3f}s c_ref_y={c_ref[1]:.3f} c_y={c[1]:.3f} "
-                        f"target_ratio={target_support_ratio:.3f} "
-                        f"meas_fz=({support_force:.1f},{swing_force:.1f}) "
-                        f"opt_fz=({f_opt[2]:.1f},{f_opt[6]:.1f}) "
-                        f"tau_norm={np.linalg.norm(tau):.2f} "
-                        f"vdot_norm={np.linalg.norm(v_dot):.1f} status={wbc_ds.last_status}"
-                    )
             else:
                 applied_tau = safe_tau.copy()
                 if t - last_wbc_warn_time >= 0.25:
@@ -677,14 +635,6 @@ def main() -> None:
             if (
                 wbc_result is None or support_force < hold_force_threshold
             ) and t - last_wbc_warn_time >= 0.25:
-                if J_c is not None and J_c.shape[0] % 6 == 0:
-                    J_c_lin = np.vstack(
-                        [J_c[6 * i : 6 * i + 3, :] for i in range(J_c.shape[0] // 6)]
-                    )
-                else:
-                    J_c_lin = J_c[:3, :] if J_c is not None else np.zeros((3, robot.nv))
-                J_c_gram = J_c_lin @ J_c_lin.T
-                J_c_cond = np.linalg.cond(J_c_gram + 1e-6 * np.eye(J_c_gram.shape[0]))
                 fallback_reason = (
                     f"support force below hold threshold ({support_force:.1f}N)"
                     if support_force < hold_force_threshold
@@ -693,10 +643,7 @@ def main() -> None:
                 print(
                     f"[WARN] t={t:.3f}s using fallback support torque: {fallback_reason}, "
                     f"phase={phase.name}, "
-                    f"support={support_name(robot.link_to_foot_name, support_foot_link)}, "
-                    f"force={support_force:.1f}N, alpha={effective_alpha:.2f}, "
-                    f"rank(Jc)={np.linalg.matrix_rank(J_c_lin)}, "
-                    f"cond(JcJc^T)={J_c_cond:.2e}, f_ref={format_vector(f_ref)}"
+                    f"support={support_name(robot.link_to_foot_name, support_foot_link)}"
                 )
                 last_wbc_warn_time = t
 

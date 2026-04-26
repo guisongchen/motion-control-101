@@ -66,7 +66,7 @@ stateDiagram-v2
     [*] --> INIT_SETTLE : start
     INIT_SETTLE --> DOUBLE_SUPPORT_HOLD : check_init_settle_transition()
     DOUBLE_SUPPORT_HOLD --> LOAD_SHIFT : check_double_support_transition()
-    LOAD_SHIFT --> PRE_LIFTOFF : check_load_shift_transition()
+    LOAD_SHIFT --> PRE_LIFTOFF : evaluate_load_shift_readiness()
     PRE_LIFTOFF --> SINGLE_SUPPORT : check_pre_liftoff_transition()
     SINGLE_SUPPORT --> [*] : end of simulation
 ```
