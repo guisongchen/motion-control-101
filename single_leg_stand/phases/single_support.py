@@ -11,7 +11,6 @@ from config import (
     SINGLE_SUPPORT_ESTABLISH_SUPPORT_RATIO,
     SINGLE_SUPPORT_ESTABLISH_SWING_FORCE_MAX,
     SINGLE_SUPPORT_ESTABLISH_COM_SPEED,
-    SLIP_THRESH,
     SINGLE_SUPPORT_HOLD_FORCE,
     SINGLE_SUPPORT_MPC_DELAY,
     SINGLE_SUPPORT_FORCE_BLEND_TIME,
@@ -89,8 +88,6 @@ def update_single_support_establishment(
         and load_shift_metrics.support_ratio >= SINGLE_SUPPORT_ESTABLISH_SUPPORT_RATIO
         and load_shift_metrics.swing_force <= SINGLE_SUPPORT_ESTABLISH_SWING_FORCE_MAX
         and load_shift_metrics.com_speed <= SINGLE_SUPPORT_ESTABLISH_COM_SPEED
-        and load_shift_metrics.support_slip <= SLIP_THRESH
-        and load_shift_metrics.swing_slip <= SLIP_THRESH
     )
     if not established_ready:
         ss_state.ready_since = None

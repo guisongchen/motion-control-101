@@ -395,7 +395,9 @@ def main() -> None:
             swing_foot_link,
         )
 
-        if phase in (ControlPhase.LOAD_SHIFT, ControlPhase.PRE_LIFTOFF):
+        if phase in (ControlPhase.LOAD_SHIFT, ControlPhase.PRE_LIFTOFF) or (
+            phase == ControlPhase.SINGLE_SUPPORT and not ss_state.established
+        ):
             if ds_to_ss_transition_start_time is not None:
                 progress = (t - ds_to_ss_transition_start_time) / ds_to_ss_duration
                 c_ref, c_dot_ref, c_ddot_ref = compute_transition_com_trajectory(
@@ -547,12 +549,20 @@ def main() -> None:
                     (1.0 - phase_progress) * 0.5
                     + phase_progress * LOAD_SHIFT_SUPPORT_RATIO
                 )
-            else:
+            elif phase == ControlPhase.PRE_LIFTOFF:
                 phase_progress = smoothstep(
                     (t - phase_start_time) / max(PRE_LIFTOFF_TIME, 1e-6)
                 )
                 target_support_ratio = (
                     (1.0 - phase_progress) * LOAD_SHIFT_SUPPORT_RATIO
+                    + phase_progress * SINGLE_SUPPORT_SUPPORT_RATIO
+                )
+            else:
+                phase_progress = smoothstep(
+                    (t - phase_start_time) / max(SINGLE_SUPPORT_ENTRY_TIME, 1e-6)
+                )
+                target_support_ratio = (
+                    (1.0 - phase_progress) * PRE_LIFTOFF_SUPPORT_RATIO
                     + phase_progress * SINGLE_SUPPORT_SUPPORT_RATIO
                 )
 
