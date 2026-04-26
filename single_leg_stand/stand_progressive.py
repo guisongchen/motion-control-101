@@ -104,7 +104,7 @@ PHASE_CONFIG = {
     "ds_force_weight_xy": 100.0,
     "ds_force_weight_z": 100.0,
     "ds_load_dist_weight": 3000.0,
-    "ds_posture_blend": 0.30,
+    "ds_posture_blend": 0.50,
     "kp_c": 150.0,
     "kd_c": 30.0,
     "kp_L": 15.0,
@@ -245,25 +245,26 @@ def plot_diagnostics(
     n_phases = max(phase_arr)
 
     phase_times = []
-    phase_labels = []
     for p in range(1, n_phases + 1):
         idx = np.where(phase_arr >= p)[0]
         if len(idx) > 0:
             phase_times.append(time_arr[idx[0]])
-            phase_labels.append(PhaseId(p).name)
+
+    def vlines(ax):
+        for pt in phase_times:
+            ax.axvline(pt, color="gray", linestyle="--", alpha=0.4)
 
     fig, axes = plt.subplots(6, 1, figsize=(12, 16), sharex=True)
 
-    # 1. CoM tracking error (y-axis)
+    # 1. CoM tracking error
     ax = axes[0]
     for i, label in enumerate(["x", "y", "z"]):
         ax.plot(time_arr, com_arr[:, i] - com_ref_arr[:, i], label=label)
     ax.set_ylabel("CoM error [m]")
+    ax.axhline(0, color="k", linewidth=0.5)
     ax.legend(loc="upper right")
     ax.grid(True, alpha=0.3)
-    ax.axhline(0, color="k", linewidth=0.5)
-    for pt in phase_times:
-        ax.axvline(pt, color="gray", linestyle="--", alpha=0.4)
+    vlines(ax)
 
     # 2. Support ratio
     ax = axes[1]
@@ -273,25 +274,10 @@ def plot_diagnostics(
     ax.set_ylim(0.4, 1.05)
     ax.legend(loc="upper right")
     ax.grid(True, alpha=0.3)
-    for pt in phase_times:
-        ax.axvline(pt, color="gray", linestyle="--", alpha=0.4)
+    vlines(ax)
 
-    # 3. Foot normal forces
+    # 3. Foot slip
     ax = axes[2]
-    for link_id in candidate_foot_links:
-        forces = np.array(foot_force_log[link_id])
-        name = link_to_foot_name.get(link_id, f"link_{link_id}")
-        ax.plot(time_arr, forces, label=name)
-    # Also plot swing_force_log for reference
-    ax.plot(time_arr, swing_force_log, ":", color="magenta", alpha=0.5, label="swing (from metrics)")
-    ax.set_ylabel("Normal force [N]")
-    ax.legend(loc="upper right")
-    ax.grid(True, alpha=0.3)
-    for pt in phase_times:
-        ax.axvline(pt, color="gray", linestyle="--", alpha=0.4)
-
-    # 4. Foot slip
-    ax = axes[3]
     for link_id in candidate_foot_links:
         slip = np.array(foot_slip_log[link_id]) * 1000.0
         name = link_to_foot_name.get(link_id, f"link_{link_id}")
@@ -299,30 +285,32 @@ def plot_diagnostics(
     ax.set_ylabel("Foot slip [mm]")
     ax.legend(loc="upper right")
     ax.grid(True, alpha=0.3)
-    for pt in phase_times:
-        ax.axvline(pt, color="gray", linestyle="--", alpha=0.4)
+    vlines(ax)
 
-    # 5. Roll delta
-    ax = axes[4]
+    # 4. Roll delta
+    ax = axes[3]
     ax.plot(time_arr, roll_delta_log)
     ax.set_ylabel("Roll delta [rad]")
     ax.grid(True, alpha=0.3)
-    for pt in phase_times:
-        ax.axvline(pt, color="gray", linestyle="--", alpha=0.4)
+    vlines(ax)
 
-    # 6. CoP y + Angular momentum
-    ax = axes[5]
+    # 5. CoP y-position
+    ax = axes[4]
     ax.plot(time_arr, cop_y_log, label="CoP y")
     ax.set_ylabel("CoP y [m]")
-    ax.legend(loc="upper left")
-    for pt in phase_times:
-        ax.axvline(pt, color="gray", linestyle="--", alpha=0.4)
-    ax_twin = ax.twinx()
-    ax_twin.plot(time_arr, L_arr[:, 0], "--", alpha=0.5, label="L_x")
-    ax_twin.plot(time_arr, L_arr[:, 1], "--", alpha=0.5, label="L_y")
-    ax_twin.set_ylabel("Angular momentum")
-    ax_twin.legend(loc="upper right")
+    ax.legend(loc="upper right")
     ax.grid(True, alpha=0.3)
+    vlines(ax)
+
+    # 6. Angular momentum
+    ax = axes[5]
+    for i, label in enumerate(["Lx", "Ly", "Lz"]):
+        ax.plot(time_arr, L_arr[:, i], label=label)
+    ax.set_ylabel("Angular momentum")
+    ax.axhline(0, color="k", linewidth=0.5)
+    ax.legend(loc="upper right")
+    ax.grid(True, alpha=0.3)
+    vlines(ax)
 
     axes[-1].set_xlabel("Time [s]")
     fig.suptitle("Diagnostics")
@@ -434,6 +422,7 @@ def main() -> None:
     pl_gate = StabilityGate()
     c_ref = nominal_c_ref.copy()
     standing_com_z = measured_com_z
+    phase_entry_com_xy = nominal_c_ref[:2].copy()
 
     print(f"\n===== Phase Experiment (duration={cfg['sim_duration']:.1f}s) =====")
     print(f"Support: {support_leg}, Swing: {swing_leg}")
@@ -523,6 +512,7 @@ def main() -> None:
         if next_phase is not None:
             phase = next_phase
             phase_start_time = t
+            phase_entry_com_xy = c[:2].copy()
             print(f"[PHASE] t={t:.3f}s -> {PhaseId(phase).name}")
             if phase == PhaseId.DOUBLE_SUPPORT_HOLD:
                 standing_com_z = float(c[2])
@@ -531,31 +521,30 @@ def main() -> None:
             elif phase == PhaseId.SINGLE_SUPPORT:
                 standing_com_z = float(c[2])
 
-        # --- Compute c_ref ---
+        # --- Compute c_ref (adaptive: smoothstep from phase-entry CoM toward target) ---
         c_dot_ref = np.zeros(3)
         c_ddot_ref = np.zeros(3)
         support_xy = initial_foot_pos[preferred_support_foot_link][:2]
         swing_xy = initial_foot_pos[swing_foot_link][:2]
         stance_midpoint = 0.5 * (support_xy + swing_xy)
+        support_direction = support_xy - stance_midpoint
 
         if phase <= PhaseId.DOUBLE_SUPPORT_HOLD:
             c_ref = nominal_c_ref.copy()
         elif phase == PhaseId.LOAD_SHIFT:
             progress = smoothstep(elapsed / max(cfg["load_shift_time"], 1e-6))
-            target_ratio = 0.5 + progress * (cfg["load_shift_target_ratio"] - 0.5)
-            target_xy = stance_midpoint + target_ratio * (support_xy - stance_midpoint)
+            target_xy = stance_midpoint + cfg["load_shift_target_ratio"] * support_direction
             c_ref = nominal_c_ref.copy()
-            c_ref[:2] = target_xy
+            c_ref[:2] = (1.0 - progress) * phase_entry_com_xy + progress * target_xy
         elif phase == PhaseId.PRE_LIFTOFF:
             progress = smoothstep(elapsed / max(cfg["pre_liftoff_time"], 1e-6))
-            target_ratio = cfg["load_shift_target_ratio"] + progress * (cfg["single_support_support_ratio"] - cfg["load_shift_target_ratio"])
-            target_xy = stance_midpoint + target_ratio * (support_xy - stance_midpoint)
+            target_xy = stance_midpoint + cfg["single_support_support_ratio"] * support_direction
             c_ref = nominal_c_ref.copy()
-            c_ref[:2] = target_xy
+            c_ref[:2] = (1.0 - progress) * phase_entry_com_xy + progress * target_xy
         else:
-            target_xy = stance_midpoint + cfg["single_support_com_ratio"] * (support_xy - stance_midpoint)
+            # SINGLE_SUPPORT: hold CoM at phase-entry position (adaptive)
             c_ref = nominal_c_ref.copy()
-            c_ref[:2] = target_xy
+            c_ref[:2] = phase_entry_com_xy
 
         if standing_com_z is not None:
             c_ref[2] = standing_com_z
@@ -828,11 +817,15 @@ def main() -> None:
             link = fc["link"]
             foot_force_log[link].append(fc["normal_force"])
 
+        link_force = {fc["link"]: fc["normal_force"] for fc in foot_contacts}
         for link in candidate_foot_links:
-            current_pos = robot.get_contact_metrics(link)["position"]
-            foot_slip_log[link].append(
-                float(np.linalg.norm(current_pos[:2] - initial_foot_pos[link][:2]))
-            )
+            if link_force.get(link, 0.0) > 10.0:
+                current_pos = robot.get_contact_metrics(link)["position"]
+                foot_slip_log[link].append(
+                    float(np.linalg.norm(current_pos[:2] - initial_foot_pos[link][:2]))
+                )
+            else:
+                foot_slip_log[link].append(np.nan)
 
         support_cop = robot.get_contact_metrics(preferred_support_foot_link)
         cop_y_log.append(float(support_cop["cop_position"][1]))
