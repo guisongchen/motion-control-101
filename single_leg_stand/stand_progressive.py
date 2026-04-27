@@ -394,6 +394,8 @@ def main() -> None:
     # Single-support MPC and WBC
     mpc = CentroidalMPC()
     wbc_ss = WholeBodyController(robot.nv, num_contacts=4, contact_dim=3)
+    wbc_ds_4 = WholeBodyController(robot.nv, num_contacts=4, contact_dim=3)
+    wbc_ds_8 = WholeBodyController(robot.nv, num_contacts=8, contact_dim=3)
     x_ref = np.zeros(NX)
     x_ref[2] = measured_com_z
     u_ref = np.zeros(NU)
@@ -666,10 +668,10 @@ def main() -> None:
             active_locals = support_contact_locals + (swing_contact_locals if include_swing else [])
             active_links = [preferred_support_foot_link] * len(support_contact_locals) + ([swing_foot_link] * len(swing_contact_locals) if include_swing else [])
             n_contacts = len(active_locals)
-            wbc_ds = WholeBodyController(robot.nv, num_contacts=n_contacts, contact_dim=3)
+            wbc_ds = wbc_ds_4 if n_contacts <= 4 else wbc_ds_8
 
             M = robot.compute_mass_matrix(q)
-            C = robot.compute_coriolis_gravity(q, v)
+            C = C_safe
 
             all_locals = active_locals
             all_links = active_links

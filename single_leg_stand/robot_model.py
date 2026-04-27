@@ -153,7 +153,7 @@ class RobotModel:
         self.data.qvel[:] = qvel
         mujoco.mj_forward(self.model, self.data)
 
-    def _centroidal_jacobian_from_unit_velocities(
+    def _centroidal_jacobian_fd(
         self, q: np.ndarray, quantity: str
     ) -> np.ndarray:
         self._sync_state(q=q, v=np.zeros(self.nv))
@@ -176,6 +176,19 @@ class RobotModel:
 
         self._restore_state(saved_qpos, saved_qvel)
         return J
+
+    def get_com_jacobian(self, q: np.ndarray) -> np.ndarray:
+        """Compute center-of-mass Jacobian via mj_jacSubtreeCom, shape (3, nv)."""
+        self._sync_state(q=q)
+        J_com = np.zeros((3, self.nv))
+        mujoco.mj_jacSubtreeCom(self.model, self.data, J_com, self.root_body_id)
+        return J_com
+
+    def get_angular_momentum_jacobian(self, q: np.ndarray) -> np.ndarray:
+        """Compute centroidal angular-momentum Jacobian via finite-difference, shape (3, nv)."""
+        return self._centroidal_jacobian_fd(
+            q, quantity="angular_momentum"
+        )
 
     def get_state(self) -> tuple[np.ndarray, np.ndarray]:
         """Return current state (q, v)."""
@@ -231,16 +244,6 @@ class RobotModel:
         jacr = np.zeros((3, self.nv))
         mujoco.mj_jac(self.model, self.data, jacp, jacr, world_point, foot_link)
         return np.vstack([jacp, jacr])
-
-    def get_com_jacobian(self, q: np.ndarray) -> np.ndarray:
-        """Compute center-of-mass Jacobian, shape (3, nv)."""
-        return self._centroidal_jacobian_from_unit_velocities(q, quantity="com")
-
-    def get_angular_momentum_jacobian(self, q: np.ndarray) -> np.ndarray:
-        """Compute centroidal angular-momentum Jacobian, shape (3, nv)."""
-        return self._centroidal_jacobian_from_unit_velocities(
-            q, quantity="angular_momentum"
-        )
 
     def get_link_com_position(self, link_index: int) -> np.ndarray:
         """Get world-frame body CoM position, shape (3,)."""
