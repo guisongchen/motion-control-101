@@ -5,7 +5,7 @@ import numpy as np
 from robot_model import RobotConfig
 
 g1_config = RobotConfig(
-    model_path="/home/ccc/projects/unitree_ros/robots/g1_description/g1_23dof_4d_contact.xml",
+    model_path="/home/ccc/projects/unitree_ros/robots/g1_description/g1_23dof.xml",
     root_body_name="pelvis",
     foot_link_names=[
         "left_ankle_roll_link",

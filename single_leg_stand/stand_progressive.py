@@ -633,6 +633,18 @@ def main() -> None:
         if phase in (PhaseId.DOUBLE_SUPPORT_HOLD, PhaseId.LOAD_SHIFT, PhaseId.PRE_LIFTOFF):
             # DS WBC with corner-patch contacts per foot
             # Progressive: drop swing foot from WBC if its normal force is too low
+            support_force = 0.0
+            swing_force = 0.0
+            for fc in foot_contacts:
+                if fc["link"] == preferred_support_foot_link:
+                    support_force = fc["normal_force"]
+                elif fc["link"] == swing_foot_link:
+                    swing_force = fc["normal_force"]
+            total_force = support_force + swing_force
+            if total_force < 10.0:
+                total_force = -GRAVITY[2] * robot.total_mass
+                support_force = total_force * 0.5
+                swing_force = total_force * 0.5
             swing_force_thresh = 80.0
             include_swing = swing_force >= swing_force_thresh
             active_locals = support_contact_locals + (swing_contact_locals if include_swing else [])
@@ -660,19 +672,6 @@ def main() -> None:
             L_dot_ref = np.zeros(3)
             L = state["L"]
             L_dot_des = wbc_ds.compute_desired_momentum_rate(L_ref, L, L_dot_ref, np.zeros(3))
-
-            support_force = 0.0
-            swing_force = 0.0
-            for fc in foot_contacts:
-                if fc["link"] == preferred_support_foot_link:
-                    support_force = fc["normal_force"]
-                elif fc["link"] == swing_foot_link:
-                    swing_force = fc["normal_force"]
-            total_force = support_force + swing_force
-            if total_force < 10.0:
-                total_force = -GRAVITY[2] * robot.total_mass
-                support_force = total_force * 0.5
-                swing_force = total_force * 0.5
 
             if phase == PhaseId.DOUBLE_SUPPORT_HOLD:
                 target_ratio = 0.5
