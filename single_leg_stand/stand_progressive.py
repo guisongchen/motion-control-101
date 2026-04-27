@@ -232,11 +232,12 @@ def build_safe_targets(
 
 
 def plot_diagnostics(
-    time_log, com_log, com_ref_log, phase_log, support_ratio_log,
+    time_log, com_log, com_ref_log, phase_log,
     foot_force_log, foot_slip_log, cop_y_log, L_log, roll_delta_log,
-    swing_force_log, candidate_foot_links, link_to_foot_name,
+    swing_force_log, support_force_log, candidate_foot_links, link_to_foot_name,
+    support_foot_link, swing_foot_link,
 ):
-    """Multi-panel diagnostic plot."""
+    """Multi-panel diagnostic plot with threshold reference lines."""
     time_arr = np.array(time_log)
     com_arr = np.stack(com_log)
     com_ref_arr = np.stack(com_ref_log)
@@ -256,58 +257,72 @@ def plot_diagnostics(
 
     fig, axes = plt.subplots(6, 1, figsize=(12, 16), sharex=True)
 
-    # 1. CoM tracking error
+    # 1. CoM tracking error  ──  ±RMSE_THRESH
     ax = axes[0]
     for i, label in enumerate(["x", "y", "z"]):
         ax.plot(time_arr, com_arr[:, i] - com_ref_arr[:, i], label=label)
-    ax.set_ylabel("CoM error [m]")
     ax.axhline(0, color="k", linewidth=0.5)
+    ax.axhline(RMSE_THRESH, color="red", linestyle="--", alpha=0.5, label=f"±{RMSE_THRESH*1000:.0f} mm")
+    ax.axhline(-RMSE_THRESH, color="red", linestyle="--", alpha=0.5)
+    ax.set_ylabel("CoM error [m]")
     ax.legend(loc="upper right")
     ax.grid(True, alpha=0.3)
     vlines(ax)
 
-    # 2. Support ratio
+    # 2. Foot forces  ──  ds_min_force
     ax = axes[1]
-    ax.plot(time_arr, support_ratio_log, label="support ratio")
-    ax.axhline(0.5, color="gray", linestyle=":", alpha=0.5)
-    ax.set_ylabel("Support ratio")
-    ax.set_ylim(0.4, 1.05)
-    ax.legend(loc="upper right")
+    ax.plot(time_arr, support_force_log, label=f"support force ({link_to_foot_name.get(support_foot_link, '')})", color="C0")
+    ax.plot(time_arr, swing_force_log, label=f"swing force ({link_to_foot_name.get(swing_foot_link, '')})", color="C1")
+    ax.axhline(0, color="gray", linestyle=":", alpha=0.3)
+    ax.axhline(PHASE_CONFIG["ds_min_force"], color="red", linestyle="--", alpha=0.6, label=f"min force ({PHASE_CONFIG['ds_min_force']} N)")
+    ax.set_ylabel("Foot force [N]")
+    ax.legend(loc="upper left")
     ax.grid(True, alpha=0.3)
     vlines(ax)
 
-    # 3. Foot slip
+    # 3. Foot slip  ──  SLIP_THRESH
     ax = axes[2]
+    slip_thresh_mm = SLIP_THRESH * 1000.0
     for link_id in candidate_foot_links:
         slip = np.array(foot_slip_log[link_id]) * 1000.0
         name = link_to_foot_name.get(link_id, f"link_{link_id}")
         ax.plot(time_arr, slip, label=name)
+    ax.axhline(slip_thresh_mm, color="red", linestyle="--", alpha=0.6, label=f"slip limit ({slip_thresh_mm:.1f} mm)")
     ax.set_ylabel("Foot slip [mm]")
     ax.legend(loc="upper right")
     ax.grid(True, alpha=0.3)
     vlines(ax)
 
-    # 4. Roll delta
+    # 4. Roll delta  ──  ±load_shift_roll_delta
     ax = axes[3]
-    ax.plot(time_arr, roll_delta_log)
+    ax.plot(time_arr, roll_delta_log, label="roll delta")
+    roll_limit = PHASE_CONFIG["load_shift_roll_delta"]
+    ax.axhline(0, color="gray", linestyle=":", alpha=0.3)
+    ax.axhline(roll_limit, color="red", linestyle="--", alpha=0.5, label=f"±{roll_limit:.3f} rad")
+    ax.axhline(-roll_limit, color="red", linestyle="--", alpha=0.5)
     ax.set_ylabel("Roll delta [rad]")
+    ax.legend(loc="upper right")
     ax.grid(True, alpha=0.3)
     vlines(ax)
 
     # 5. CoP y-position
     ax = axes[4]
     ax.plot(time_arr, cop_y_log, label="CoP y")
+    ax.axhline(0, color="gray", linestyle=":", alpha=0.3)
     ax.set_ylabel("CoP y [m]")
     ax.legend(loc="upper right")
     ax.grid(True, alpha=0.3)
     vlines(ax)
 
-    # 6. Angular momentum
+    # 6. Angular momentum  ──  ±ds_max_L_norm
     ax = axes[5]
     for i, label in enumerate(["Lx", "Ly", "Lz"]):
         ax.plot(time_arr, L_arr[:, i], label=label)
-    ax.set_ylabel("Angular momentum")
     ax.axhline(0, color="k", linewidth=0.5)
+    L_thresh = PHASE_CONFIG["ds_max_L_norm"]
+    ax.axhline(L_thresh, color="red", linestyle="--", alpha=0.5, label=f"±{L_thresh:.2f}")
+    ax.axhline(-L_thresh, color="red", linestyle="--", alpha=0.5)
+    ax.set_ylabel("Angular momentum")
     ax.legend(loc="upper right")
     ax.grid(True, alpha=0.3)
     vlines(ax)
@@ -414,6 +429,7 @@ def main() -> None:
     L_log = []
     roll_delta_log = []
     swing_force_log = []
+    support_force_log = []
 
     phase = PhaseId.INIT_SETTLE
     phase_start_time = 0.0
@@ -837,6 +853,7 @@ def main() -> None:
         L_log.append(state["L"].copy())
         roll_delta_log.append(roll_delta)
         swing_force_log.append(load_shift_metrics.swing_force)
+        support_force_log.append(load_shift_metrics.support_force)
 
         # --- Periodic diagnostics ---
         if step % 500 == 0:
@@ -899,9 +916,11 @@ def main() -> None:
 
     plot_diagnostics(
         time_log, com_log, com_ref_log, phase_log,
-        support_ratio_log, foot_force_log, foot_slip_log,
+        foot_force_log, foot_slip_log,
         cop_y_log, L_log, roll_delta_log, swing_force_log,
+        support_force_log,
         candidate_foot_links, robot.link_to_foot_name,
+        preferred_support_foot_link, swing_foot_link,
     )
 
 
