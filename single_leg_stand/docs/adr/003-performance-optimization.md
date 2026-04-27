@@ -1,4 +1,4 @@
-# ADR 001: Stand-Progressive Simulation Performance Optimization
+# ADR 003: Stand-Progressive Simulation Performance Optimization
 
 ## Status
 
@@ -172,6 +172,8 @@ uv run python single_leg_stand/stand_progressive.py
 
 ## References
 
+- [ADR 001: Phase-Driven Single Support Control](./001-phase-driven-single-support-control.md) — the phased control architecture whose per-step computations are being optimized here
+- [ADR 002: WBC/MPC Frequency Scheduling](./002-wbc-mpc-frequency-scheduling.md) — related decision on WBC and MPC solve frequency
 - [MuJoCo `mj_jacSubtreeCom` documentation](https://mujoco.readthedocs.io/en/stable/APIreference/APItypes.html#mjtNum)
 - [OSQP solver API: `update` vs `setup`](https://osqp.org/docs/interfaces/python.html)
 - Bottleneck analysis: `stand_progressive.py:448-870` (main simulation loop)
