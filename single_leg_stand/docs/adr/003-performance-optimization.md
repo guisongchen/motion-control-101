@@ -6,7 +6,7 @@ Accepted
 
 ## Context
 
-The `stand_progressive.py` simulation runs a 15-second MuJoCo physics simulation with MPC + WBC control at 1 kHz (15,000 steps). The original wall-clock time was **~180 seconds** (~3 minutes), a ~12× real-time factor that made iteration loops prohibitively slow.
+The `stand_progressive.py` simulation runs a 15-second MuJoCo physics simulation with MPC + WBC control at 1 kHz (15,000 steps). The baseline wall-clock time (measured on commit `83880f8`) was **178 seconds** (real) / **185 seconds** (user), a ~12× real-time factor that made iteration loops prohibitively slow.
 
 A bottleneck analysis identified the most expensive per-step operations:
 
@@ -20,7 +20,7 @@ A bottleneck analysis identified the most expensive per-step operations:
 
 ## Decision
 
-We applied three optimizations totaling **~25% speedup** (180s → 137s). Two additional candidates were evaluated and rejected.
+We applied three optimizations totaling **~23% speedup** (178s → 137s real time). Two additional candidates were evaluated and rejected.
 
 ### 1. Fast CoM Jacobian via `mj_jacSubtreeCom`
 
@@ -93,7 +93,7 @@ C = C_safe  # reuse already-computed value
 
 ### Positive
 
-- **~25% wall-clock speedup** (180s → 137s for 15s simulation, from ~12× to ~9× real-time factor)
+- **~23% wall-clock speedup** (178s → 137s real time for 15s simulation, from ~12× to ~9× real-time factor)
 - Simulation behavior is **identical** to the original (same CoM tracking, same phase transitions, same force profiles)
 - No new dependencies introduced
 - Code is cleaner: pre-allocated WBC instances eliminate a long-lived code smell
@@ -166,8 +166,8 @@ uv run python single_leg_stand/stand_progressive.py
 
 ```bash
 /usr/bin/time -p uv run python single_leg_stand/stand_progressive.py
-# Before: real ~180s (3 min)
-# After:  real ~137s (2.3 min)
+# Before (commit 83880f8): real ~178s, user ~185s
+# After  (commit 499a33c):  real ~137s, user ~144s
 ```
 
 ## References
