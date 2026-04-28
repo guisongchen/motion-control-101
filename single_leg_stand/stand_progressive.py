@@ -229,6 +229,28 @@ def build_safe_targets(
     return targets, roll_delta
 
 
+def compute_c_ref(phase, elapsed, phase_entry_com_xy, nominal_c_ref,
+                  stance_midpoint, support_direction, standing_com_z, cfg):
+    if phase <= PhaseId.DOUBLE_SUPPORT_HOLD:
+        c_ref = nominal_c_ref.copy()
+    elif phase == PhaseId.LOAD_SHIFT:
+        progress = smoothstep(elapsed / max(cfg["load_shift_time"], 1e-6))
+        target_xy = stance_midpoint + cfg["load_shift_target_ratio"] * support_direction
+        c_ref = nominal_c_ref.copy()
+        c_ref[:2] = (1.0 - progress) * phase_entry_com_xy + progress * target_xy
+    elif phase == PhaseId.PRE_LIFTOFF:
+        progress = smoothstep(elapsed / max(cfg["pre_liftoff_time"], 1e-6))
+        target_xy = stance_midpoint + cfg["single_support_support_ratio"] * support_direction
+        c_ref = nominal_c_ref.copy()
+        c_ref[:2] = (1.0 - progress) * phase_entry_com_xy + progress * target_xy
+    else:
+        c_ref = nominal_c_ref.copy()
+        c_ref[:2] = phase_entry_com_xy
+    if standing_com_z is not None:
+        c_ref[2] = standing_com_z
+    return c_ref
+
+
 def print_results(log: SimLog, robot: RobotModel, initial_foot_pos: dict):
     print(f"\n{'='*60}")
     print("===== RESULTS =====")
@@ -464,25 +486,8 @@ def main() -> None:
         stance_midpoint = 0.5 * (support_xy + swing_xy)
         support_direction = support_xy - stance_midpoint
 
-        if phase <= PhaseId.DOUBLE_SUPPORT_HOLD:
-            c_ref = nominal_c_ref.copy()
-        elif phase == PhaseId.LOAD_SHIFT:
-            progress = smoothstep(elapsed / max(cfg["load_shift_time"], 1e-6))
-            target_xy = stance_midpoint + cfg["load_shift_target_ratio"] * support_direction
-            c_ref = nominal_c_ref.copy()
-            c_ref[:2] = (1.0 - progress) * phase_entry_com_xy + progress * target_xy
-        elif phase == PhaseId.PRE_LIFTOFF:
-            progress = smoothstep(elapsed / max(cfg["pre_liftoff_time"], 1e-6))
-            target_xy = stance_midpoint + cfg["single_support_support_ratio"] * support_direction
-            c_ref = nominal_c_ref.copy()
-            c_ref[:2] = (1.0 - progress) * phase_entry_com_xy + progress * target_xy
-        else:
-            # SINGLE_SUPPORT: hold CoM at phase-entry position (adaptive)
-            c_ref = nominal_c_ref.copy()
-            c_ref[:2] = phase_entry_com_xy
-
-        if standing_com_z is not None:
-            c_ref[2] = standing_com_z
+        c_ref = compute_c_ref(phase, elapsed, phase_entry_com_xy, nominal_c_ref,
+                              stance_midpoint, support_direction, standing_com_z, cfg)
 
         # --- Compute safe_tau (PD posture + C_bias) ---
         C_safe = robot.compute_coriolis_gravity(q, v)
