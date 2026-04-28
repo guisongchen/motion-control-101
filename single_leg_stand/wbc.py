@@ -13,12 +13,16 @@ from utils import build_friction_cone_matrix
 class WholeBodyController:
     """全身控制器：将 MPC 参考转化为关节力矩。"""
 
-    def __init__(self, nv: int, num_contacts: int = 1, contact_dim: int = 4):
+    def __init__(self, nv: int, num_contacts: int = 1, contact_dim: int = 4,
+                 kp_c: float = None, kd_c: float = None,
+                 kp_L: float = None, kd_L: float = None):
         """
         Args:
             nv: 广义速度维度 (n+6)
             num_contacts: 接触点数量
             contact_dim: 每个接触点的接触力维度。3 = [fx, fy, fz], 4 = [fx, fy, fz, mz]
+            kp_c, kd_c: CoM tracking PD gains. Default from config.
+            kp_L, kd_L: Angular momentum PD gains. Default from config.
         """
         if contact_dim not in (3, 4):
             raise ValueError(f"contact_dim must be 3 or 4, got {contact_dim}")
@@ -34,6 +38,11 @@ class WholeBodyController:
             self.A_fcon, self.b_fcon = build_friction_cone_matrix(MU, TORSIONAL_FRICTION_GAMMA)
         else:
             self.A_fcon, self.b_fcon = build_friction_cone_matrix(MU)
+        self.kp_c = kp_c if kp_c is not None else Kp_c
+        self.kd_c = kd_c if kd_c is not None else Kd_c
+        self.kp_L = kp_L if kp_L is not None else Kp_L
+        self.kd_L = kd_L if kd_L is not None else Kd_L
+
         self.last_status = "not_run"
         self.last_status_val = None
 
@@ -136,16 +145,16 @@ class WholeBodyController:
                                      c_dot_ref: np.ndarray, c_dot_est: np.ndarray,
                                      c_ddot_ref: np.ndarray) -> np.ndarray:
         c_ddot_des = (c_ddot_ref
-                      + Kp_c * (c_ref - c_est)
-                      + Kd_c * (c_dot_ref - c_dot_est))
+                      + self.kp_c * (c_ref - c_est)
+                      + self.kd_c * (c_dot_ref - c_dot_est))
         return c_ddot_des
 
     def compute_desired_momentum_rate(self,
                                       L_ref: np.ndarray, L_est: np.ndarray,
                                       L_dot_ref: np.ndarray, L_dot_est: np.ndarray) -> np.ndarray:
         L_dot_des = (L_dot_ref
-                     + Kp_L * (L_ref - L_est)
-                     + Kd_L * (L_dot_ref - L_dot_est))
+                     + self.kp_L * (L_ref - L_est)
+                     + self.kd_L * (L_dot_ref - L_dot_est))
         return L_dot_des
 
     def solve(self,

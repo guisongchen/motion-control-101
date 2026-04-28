@@ -16,8 +16,6 @@ import mujoco
 from config import (
     DT_SIM,
     GRAVITY,
-    BASE_DOF_DAMPING,
-    JOINT_DOF_DAMPING,
     MIN_SUPPORT_FORCE,
     RMSE_THRESH,
     SLIP_THRESH,
@@ -45,8 +43,6 @@ from direct_single_support.primitives import (
     compute_corner_patch_force_reference,
 )
 from utils import compute_rmse, compute_pd_torque, plot_diagnostics
-
-import wbc as wbc_module
 
 from enum import IntEnum
 
@@ -97,10 +93,6 @@ PHASE_CONFIG = {
     "ds_force_weight_z": 100.0,
     "ds_load_dist_weight": 3000.0,
     "ds_posture_blend": 0.50,
-    "kp_c": 150.0,
-    "kd_c": 30.0,
-    "kp_L": 15.0,
-    "kd_L": 3.0,
     "posture_kp": 120.0,
     "posture_kd": 16.0,
     "lift_leg_kp": 120.0,
@@ -224,7 +216,7 @@ def build_safe_targets(
 
 
 def print_results(
-    com_log, com_ref_log, foot_force_log, candidate_foot_links,
+    com_log, com_ref_log, foot_force_log, foot_links,
     initial_foot_pos, robot, phase_log, time_log, support_ratio_log,
 ):
     print(f"\n{'='*60}")
@@ -234,13 +226,13 @@ def print_results(
     max_slip = 0.0
     final_foot_pos = {
         link: robot.get_contact_metrics(link)["position"].copy()
-        for link in candidate_foot_links
+        for link in foot_links
     }
-    for link in candidate_foot_links:
+    for link in foot_links:
         slip = np.linalg.norm(final_foot_pos[link][:2] - initial_foot_pos[link][:2])
         max_slip = max(max_slip, slip)
     print(f"Max foot slip: {max_slip*1000:.2f} mm (target < {SLIP_THRESH*1000:.1f} mm)")
-    for link in candidate_foot_links:
+    for link in foot_links:
         forces = np.array(foot_force_log[link])
         avg_force = np.mean(forces) if len(forces) > 0 else 0.0
         name = support_name(robot.link_to_foot_name, link)
@@ -272,31 +264,18 @@ def print_results(
 
 def main() -> None:
     cfg = PHASE_CONFIG
-    wbc_module.Kp_c = cfg["kp_c"]
-    wbc_module.Kd_c = cfg["kd_c"]
-    wbc_module.Kp_L = cfg["kp_L"]
-    wbc_module.Kd_L = cfg["kd_L"]
 
     robot = RobotModel(g1_config)
-    robot.model.opt.gravity[:] = GRAVITY
-    robot.model.opt.timestep = DT_SIM
-    robot.model.dof_damping[:6] = BASE_DOF_DAMPING
-    robot.model.dof_damping[6:] = JOINT_DOF_DAMPING
-    robot.reset_base_pose(g1_config.base_initial_pos, g1_config.base_initial_orn)
 
     swing_leg = g1_config.lift_leg
     support_leg = "right" if swing_leg == "left" else "left"
-    preferred_support_foot_link = robot.foot_name_to_link[g1_config.support_foot_name]
+    support_leg_link = robot.foot_name_to_link[g1_config.support_foot_name]
     swing_foot_link = robot.foot_name_to_link[g1_config.swing_foot_name]
-    candidate_foot_links = robot.foot_link_ids
+    foot_links = robot.foot_link_ids
     estimator = StateEstimator(robot)
 
-    initial_dof_angles = np.zeros(len(robot.dof_joints))
-    joint_name_to_dof_idx = robot.dof_joint_name_to_index.copy()
-    for idx, joint_name in enumerate(robot.dof_joint_names):
-        if joint_name in g1_config.standing_joint_angles:
-            initial_dof_angles[idx] = g1_config.standing_joint_angles[joint_name]
-    robot.reset_joint_positions(initial_dof_angles)
+    initial_dof_angles = robot.set_standing_angles(g1_config.standing_joint_angles)
+    joint_name_to_dof_idx = robot.dof_joint_name_to_index
     measured_com_z = float(robot.compute_com_position()[2])
 
     tau_max_limits = robot.tau_limits.copy()
@@ -307,25 +286,28 @@ def main() -> None:
         if name in joint_name_to_dof_idx
     ]
 
+    # qpos starts with floating base (7: 3 pos + 4 quat), then actuated joints.
+    # qvel starts with 6 base DOFs, then actuated joints.
+    # These offsets let us slice q[nq_base:] and v[nv_base:] to get joint state only.
     nq_base = robot.model.jnt_qposadr[1] if robot.model.njnt > 1 else robot.model.nq
     nv_base = robot.model.jnt_dofadr[1] if robot.model.njnt > 1 else robot.model.nv
 
     initial_foot_pos = {
         link: np.array(robot.get_contact_metrics(link)["position"], copy=True)
-        for link in candidate_foot_links
+        for link in foot_links
     }
     nominal_c_ref = np.zeros(3)
     nominal_c_ref[2] = measured_com_z
     nominal_c_ref[:2] = np.mean(
-        [initial_foot_pos[link][:2] for link in candidate_foot_links], axis=0
+        [initial_foot_pos[link][:2] for link in foot_links], axis=0
     )
 
-    support_contact_locals = resolve_corner_local_positions(robot, preferred_support_foot_link)
+    support_contact_locals = resolve_corner_local_positions(robot, support_leg_link)
     swing_contact_locals = resolve_corner_local_positions(robot, swing_foot_link)
-    initial_support_metrics = robot.get_contact_metrics(preferred_support_foot_link)
+    initial_support_metrics = robot.get_contact_metrics(support_leg_link)
     initial_support_contact = initial_support_metrics["position"].copy()
     initial_support_yaw = yaw_from_rotation(
-        np.array(robot.data.xmat[preferred_support_foot_link]).reshape(3, 3)
+        np.array(robot.data.xmat[support_leg_link]).reshape(3, 3)
     )
 
     # Single-support MPC and WBC
@@ -345,7 +327,7 @@ def main() -> None:
     # Direct-pose for single-support reference
     direct_pose = build_direct_pose(robot.dof_joint_names, support_leg)
     support_contact_local_positions = resolve_support_contact_local_positions(
-        robot, preferred_support_foot_link, initial_support_contact
+        robot, support_leg_link, initial_support_contact
     )
 
     mpc_force_target = u_ref.copy()
@@ -365,8 +347,8 @@ def main() -> None:
     com_ref_log = []
     support_ratio_log = []
     phase_log = []
-    foot_force_log = {link: [] for link in candidate_foot_links}
-    foot_slip_log = {link: [] for link in candidate_foot_links}
+    foot_force_log = {link: [] for link in foot_links}
+    foot_slip_log = {link: [] for link in foot_links}
     cop_y_log = []
     L_log = []
     roll_delta_log = []
@@ -412,14 +394,14 @@ def main() -> None:
             double_support_forces = [
                 get_contact_entry(foot_contacts, link)["normal_force"]
                 if get_contact_entry(foot_contacts, link) is not None else 0.0
-                for link in candidate_foot_links
+                for link in foot_links
             ]
             max_slip = max(
                 np.linalg.norm(
                     get_contact_entry(foot_contacts, link)["position"][:2]
                     - initial_foot_pos[link][:2]
                 )
-                for link in candidate_foot_links
+                for link in foot_links
             )
             com_vel_ok = float(np.linalg.norm(c_dot)) <= cfg["ds_max_com_vel"]
             L = state["L"]
@@ -429,7 +411,7 @@ def main() -> None:
             if total_force > 1e-6:
                 balanced = (min(double_support_forces) / total_force) >= cfg["ds_force_ratio_min"]
             corners_xy: list[np.ndarray] = []
-            for link in candidate_foot_links:
+            for link in foot_links:
                 corners_xy.extend(compute_foot_corners_world_xy(robot, link))
             com_inside = False
             if corners_xy:
@@ -482,7 +464,7 @@ def main() -> None:
         # --- Compute c_ref (adaptive: smoothstep from phase-entry CoM toward target) ---
         c_dot_ref = np.zeros(3)
         c_ddot_ref = np.zeros(3)
-        support_xy = initial_foot_pos[preferred_support_foot_link][:2]
+        support_xy = initial_foot_pos[support_leg_link][:2]
         swing_xy = initial_foot_pos[swing_foot_link][:2]
         stance_midpoint = 0.5 * (support_xy + swing_xy)
         support_direction = support_xy - stance_midpoint
@@ -595,7 +577,7 @@ def main() -> None:
                 support_force = 0.0
                 swing_force = 0.0
                 for fc in foot_contacts:
-                    if fc["link"] == preferred_support_foot_link:
+                    if fc["link"] == support_leg_link:
                         support_force = fc["normal_force"]
                     elif fc["link"] == swing_foot_link:
                         swing_force = fc["normal_force"]
@@ -607,7 +589,7 @@ def main() -> None:
                 swing_force_thresh = 80.0
                 include_swing = swing_force >= swing_force_thresh
                 active_locals = support_contact_locals + (swing_contact_locals if include_swing else [])
-                active_links = [preferred_support_foot_link] * len(support_contact_locals) + ([swing_foot_link] * len(swing_contact_locals) if include_swing else [])
+                active_links = [support_leg_link] * len(support_contact_locals) + ([swing_foot_link] * len(swing_contact_locals) if include_swing else [])
                 n_contacts = len(active_locals)
                 wbc_ds = wbc_ds_4 if n_contacts <= 4 else wbc_ds_8
 
@@ -669,18 +651,18 @@ def main() -> None:
         elif phase == PhaseId.SINGLE_SUPPORT:
             ss_elapsed = t - phase_start_time
             # Update support foot tracking
-            support_contact = get_contact_entry(foot_contacts, preferred_support_foot_link)
+            support_contact = get_contact_entry(foot_contacts, support_leg_link)
             measured_support_point = (
                 support_contact["position"].copy()
                 if support_contact is not None
-                else robot.get_link_com_position(preferred_support_foot_link)
+                else robot.get_link_com_position(support_leg_link)
             )
             alpha = 0.1
             filtered_support_pos = (1.0 - alpha) * filtered_support_pos + alpha * measured_support_point
             p_foot = filtered_support_pos.copy()
 
             if not ss_established and ss_elapsed > cfg["single_support_entry_time"]:
-                support_metrics_now = robot.get_contact_metrics(preferred_support_foot_link)
+                support_metrics_now = robot.get_contact_metrics(support_leg_link)
                 if support_metrics_now["normal_force"] >= cfg["single_support_hold_force"]:
                     ss_established = True
                     ss_com_ref = c.copy()
@@ -720,7 +702,7 @@ def main() -> None:
 
                     J_blocks_ss = []
                     for local_pos in support_contact_local_positions:
-                        J = robot.get_foot_jacobian(preferred_support_foot_link, q, local_position=local_pos)
+                        J = robot.get_foot_jacobian(support_leg_link, q, local_position=local_pos)
                         J_blocks_ss.append(J[:3])
                     J_c_ss = np.vstack(J_blocks_ss)
                     Jc_dot_ss = np.zeros_like(J_c_ss)
@@ -735,8 +717,8 @@ def main() -> None:
                     total_fz_ss = max(-GRAVITY[2] * robot.total_mass, 1e-6)
                     f_ref_ss = compute_corner_patch_force_reference(
                         support_contact_local_positions,
-                        np.array(robot.data.xpos[preferred_support_foot_link], copy=True),
-                        np.array(robot.data.xmat[preferred_support_foot_link]).reshape(3, 3),
+                        np.array(robot.data.xpos[support_leg_link], copy=True),
+                        np.array(robot.data.xmat[support_leg_link]).reshape(3, 3),
                         filtered_cop_world,
                         total_fz_ss,
                     )
@@ -789,7 +771,7 @@ def main() -> None:
             foot_force_log[link].append(fc["normal_force"])
 
         link_force = {fc["link"]: fc["normal_force"] for fc in foot_contacts}
-        for link in candidate_foot_links:
+        for link in foot_links:
             if link_force.get(link, 0.0) > 10.0:
                 current_pos = robot.get_contact_metrics(link)["position"]
                 foot_slip_log[link].append(
@@ -798,7 +780,7 @@ def main() -> None:
             else:
                 foot_slip_log[link].append(np.nan)
 
-        support_cop = robot.get_contact_metrics(preferred_support_foot_link)
+        support_cop = robot.get_contact_metrics(support_leg_link)
         cop_y_log.append(float(support_cop["cop_position"][1]))
 
         L_log.append(state["L"].copy())
@@ -816,7 +798,7 @@ def main() -> None:
             print(f"[t={t:.2f}s] {phase_name:20s} sf={sf:.0f}N wf={wf:.0f}N ratio={sr:.3f} com_shift={cs:.3f} c_ref_y={c_ref[1]:.4f} c_y={c[1]:.4f}")
 
     print_results(
-        com_log, com_ref_log, foot_force_log, candidate_foot_links,
+        com_log, com_ref_log, foot_force_log, foot_links,
         initial_foot_pos, robot, phase_log, time_log, support_ratio_log,
     )
 
@@ -825,8 +807,8 @@ def main() -> None:
         foot_force_log, foot_slip_log,
         cop_y_log, L_log, roll_delta_log, swing_force_log,
         support_force_log,
-        candidate_foot_links, robot.link_to_foot_name,
-        preferred_support_foot_link, swing_foot_link,
+        foot_links, robot.link_to_foot_name,
+        support_leg_link, swing_foot_link,
         rmse_thresh=RMSE_THRESH, slip_thresh=SLIP_THRESH,
         ds_min_force=cfg["ds_min_force"],
         load_shift_roll_delta=cfg["load_shift_roll_delta"],

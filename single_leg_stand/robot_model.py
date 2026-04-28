@@ -7,6 +7,8 @@ from typing import Optional
 import mujoco
 import numpy as np
 
+from config import GRAVITY, DT_SIM, BASE_DOF_DAMPING, JOINT_DOF_DAMPING
+
 
 @dataclass
 class RobotConfig:
@@ -51,6 +53,11 @@ class RobotModel:
         self.model_path = str(Path(config.model_path).expanduser())
         self.model = mujoco.MjModel.from_xml_path(self.model_path)
         self.data = mujoco.MjData(self.model)
+
+        self.model.opt.gravity[:] = GRAVITY
+        self.model.opt.timestep = DT_SIM
+        self.model.dof_damping[:6] = BASE_DOF_DAMPING
+        self.model.dof_damping[6:] = JOINT_DOF_DAMPING
 
         base_position = np.asarray(config.base_initial_pos, dtype=float)
         base_orientation = np.asarray(config.base_initial_orn, dtype=float)
@@ -292,6 +299,14 @@ class RobotModel:
         lin_vel = jacp @ self.data.qvel
         ang_vel = jacr @ self.data.qvel
         return lin_vel, ang_vel
+
+    def set_standing_angles(self, standing_joint_angles: dict[str, float]) -> np.ndarray:
+        angles = np.zeros(len(self.dof_joints))
+        for idx, joint_name in enumerate(self.dof_joint_names):
+            if joint_name in standing_joint_angles:
+                angles[idx] = standing_joint_angles[joint_name]
+        self.reset_joint_positions(angles)
+        return angles
 
     def reset_joint_positions(self, joint_positions: np.ndarray) -> None:
         """Reset actuated joint positions in DOF order and zero their velocities."""
