@@ -161,19 +161,16 @@ def compute_pd_torque(
 
 
 def plot_diagnostics(
-    time_log, com_log, com_ref_log, phase_log,
-    foot_force_log, foot_slip_log, cop_y_log, L_log, roll_delta_log,
-    swing_force_log, support_force_log, candidate_foot_links, link_to_foot_name,
-    support_foot_link, swing_foot_link,
+    log, link_to_foot_name, support_foot_link, swing_foot_link,
     rmse_thresh=0.02, slip_thresh=0.005,
     ds_min_force=80.0, load_shift_roll_delta=0.07, ds_max_L_norm=0.5,
 ):
     """Multi-panel diagnostic plot with threshold reference lines."""
-    time_arr = np.array(time_log)
-    com_arr = np.stack(com_log)
-    com_ref_arr = np.stack(com_ref_log)
-    phase_arr = np.array(phase_log)
-    L_arr = np.stack(L_log)
+    time_arr = np.array(log.t)
+    com_arr = np.stack(log.com)
+    com_ref_arr = np.stack(log.com_ref)
+    phase_arr = np.array(log.phase)
+    L_arr = np.stack(log.L)
     n_phases = max(phase_arr)
 
     phase_times = []
@@ -200,8 +197,8 @@ def plot_diagnostics(
     vlines(ax)
 
     ax = axes[1]
-    ax.plot(time_arr, support_force_log, label=f"support force ({link_to_foot_name.get(support_foot_link, '')})", color="C0")
-    ax.plot(time_arr, swing_force_log, label=f"swing force ({link_to_foot_name.get(swing_foot_link, '')})", color="C1")
+    ax.plot(time_arr, log.support_force, label=f"support force ({link_to_foot_name.get(support_foot_link, '')})", color="C0")
+    ax.plot(time_arr, log.swing_force, label=f"swing force ({link_to_foot_name.get(swing_foot_link, '')})", color="C1")
     ax.axhline(0, color="gray", linestyle=":", alpha=0.3)
     ax.axhline(ds_min_force, color="red", linestyle="--", alpha=0.6, label=f"min force ({ds_min_force} N)")
     ax.set_ylabel("Foot force [N]")
@@ -211,8 +208,8 @@ def plot_diagnostics(
 
     ax = axes[2]
     slip_thresh_mm = slip_thresh * 1000.0
-    for link_id in candidate_foot_links:
-        slip = np.array(foot_slip_log[link_id]) * 1000.0
+    for link_id in log.foot_links:
+        slip = np.array(log.foot_slip[link_id]) * 1000.0
         name = link_to_foot_name.get(link_id, f"link_{link_id}")
         ax.plot(time_arr, slip, label=name)
     ax.axhline(slip_thresh_mm, color="red", linestyle="--", alpha=0.6, label=f"slip limit ({slip_thresh_mm:.1f} mm)")
@@ -222,7 +219,7 @@ def plot_diagnostics(
     vlines(ax)
 
     ax = axes[3]
-    ax.plot(time_arr, roll_delta_log, label="roll delta")
+    ax.plot(time_arr, log.roll_delta, label="roll delta")
     ax.axhline(0, color="gray", linestyle=":", alpha=0.3)
     ax.axhline(load_shift_roll_delta, color="red", linestyle="--", alpha=0.5, label=f"±{load_shift_roll_delta:.3f} rad")
     ax.axhline(-load_shift_roll_delta, color="red", linestyle="--", alpha=0.5)
@@ -232,7 +229,7 @@ def plot_diagnostics(
     vlines(ax)
 
     ax = axes[4]
-    ax.plot(time_arr, cop_y_log, label="CoP y")
+    ax.plot(time_arr, log.cop_y, label="CoP y")
     ax.axhline(0, color="gray", linestyle=":", alpha=0.3)
     ax.set_ylabel("CoP y [m]")
     ax.legend(loc="upper right")

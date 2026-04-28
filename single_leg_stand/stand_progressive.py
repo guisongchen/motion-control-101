@@ -44,6 +44,23 @@ from utils import compute_rmse, compute_pd_torque, plot_diagnostics
 from enum import IntEnum
 
 
+class SimLog:
+    def __init__(self, foot_links):
+        self.foot_links: list[int] = foot_links
+        self.t: list[float] = []
+        self.com: list[np.ndarray] = []
+        self.com_ref: list[np.ndarray] = []
+        self.support_ratio: list[float] = []
+        self.phase: list[int] = []
+        self.foot_force: dict[int, list[float]] = {link: [] for link in foot_links}
+        self.foot_slip: dict[int, list[float]] = {link: [] for link in foot_links}
+        self.cop_y: list[float] = []
+        self.L: list[np.ndarray] = []
+        self.roll_delta: list[float] = []
+        self.swing_force: list[float] = []
+        self.support_force: list[float] = []
+
+
 class PhaseId(IntEnum):
     INIT_SETTLE = 0
     DOUBLE_SUPPORT_HOLD = 1
@@ -212,49 +229,46 @@ def build_safe_targets(
     return targets, roll_delta
 
 
-def print_results(
-    com_log, com_ref_log, foot_force_log, foot_links,
-    initial_foot_pos, robot, phase_log, time_log, support_ratio_log,
-):
+def print_results(log: SimLog, robot: RobotModel, initial_foot_pos: dict):
     print(f"\n{'='*60}")
     print("===== RESULTS =====")
-    rmse = compute_rmse(com_log, com_ref_log)
+    rmse = compute_rmse(log.com, log.com_ref)
     print(f"CoM RMSE: {rmse:.4f} m (target < {RMSE_THRESH} m)")
     max_slip = 0.0
     final_foot_pos = {
         link: robot.get_contact_metrics(link)["position"].copy()
-        for link in foot_links
+        for link in log.foot_links
     }
-    for link in foot_links:
+    for link in log.foot_links:
         slip = np.linalg.norm(final_foot_pos[link][:2] - initial_foot_pos[link][:2])
         max_slip = max(max_slip, slip)
     print(f"Max foot slip: {max_slip*1000:.2f} mm (target < {SLIP_THRESH*1000:.1f} mm)")
-    for link in foot_links:
-        forces = np.array(foot_force_log[link])
+    for link in log.foot_links:
+        forces = np.array(log.foot_force[link])
         avg_force = np.mean(forces) if len(forces) > 0 else 0.0
         name = support_name(robot.link_to_foot_name, link)
         print(f"  {name} avg force: {avg_force:.1f} N")
 
-    max_phase = max(phase_log)
+    max_phase = max(log.phase)
     print(f"\nHighest phase reached: {PhaseId(max_phase).name}")
     if max_phase >= PhaseId.LOAD_SHIFT:
         ls_ratios = []
         ls_start = None
-        for i, p in enumerate(phase_log):
+        for i, p in enumerate(log.phase):
             if p == PhaseId.LOAD_SHIFT and ls_start is None:
-                ls_start = time_log[i]
+                ls_start = log.t[i]
             if p >= PhaseId.LOAD_SHIFT and ls_start is not None:
-                ls_ratios.append(support_ratio_log[i])
+                ls_ratios.append(log.support_ratio[i])
         if ls_ratios:
             print(f"  LOAD_SHIFT max ratio: {max(ls_ratios):.3f}, mean: {np.mean(ls_ratios):.3f}")
     if max_phase >= PhaseId.PRE_LIFTOFF:
         pl_ratios = []
         pl_start = None
-        for i, p in enumerate(phase_log):
+        for i, p in enumerate(log.phase):
             if p == PhaseId.PRE_LIFTOFF and pl_start is None:
-                pl_start = time_log[i]
+                pl_start = log.t[i]
             if p >= PhaseId.PRE_LIFTOFF and pl_start is not None:
-                pl_ratios.append(support_ratio_log[i])
+                pl_ratios.append(log.support_ratio[i])
         if pl_ratios:
             print(f"  PRE_LIFTOFF max ratio: {max(pl_ratios):.3f}, mean: {np.mean(pl_ratios):.3f}")
 
@@ -334,18 +348,7 @@ def main() -> None:
 
     total_steps = int(cfg["sim_duration"] / DT_SIM)
 
-    time_log = []
-    com_log = []
-    com_ref_log = []
-    support_ratio_log = []
-    phase_log = []
-    foot_force_log = {link: [] for link in foot_links}
-    foot_slip_log = {link: [] for link in foot_links}
-    cop_y_log = []
-    L_log = []
-    roll_delta_log = []
-    swing_force_log = []
-    support_force_log = []
+    log = SimLog(foot_links)
 
     phase = PhaseId.INIT_SETTLE
     phase_start_time = 0.0
@@ -753,32 +756,27 @@ def main() -> None:
         robot.step()
 
         # --- Logging ---
-        time_log.append(t)
-        com_log.append(c.copy())
-        com_ref_log.append(c_ref.copy())
-        phase_log.append(int(phase))
-        support_ratio_log.append(load_shift_metrics.support_ratio)
+        log.t.append(t)
+        log.com.append(c.copy())
+        log.com_ref.append(c_ref.copy())
+        log.phase.append(int(phase))
+        log.support_ratio.append(load_shift_metrics.support_ratio)
         for fc in foot_contacts:
-            link = fc["link"]
-            foot_force_log[link].append(fc["normal_force"])
-
+            log.foot_force[fc["link"]].append(fc["normal_force"])
         link_force = {fc["link"]: fc["normal_force"] for fc in foot_contacts}
         for link in foot_links:
             if link_force.get(link, 0.0) > 10.0:
                 current_pos = robot.get_contact_metrics(link)["position"]
-                foot_slip_log[link].append(
+                log.foot_slip[link].append(
                     float(np.linalg.norm(current_pos[:2] - initial_foot_pos[link][:2]))
                 )
             else:
-                foot_slip_log[link].append(np.nan)
-
-        support_cop = robot.get_contact_metrics(support_leg_link)
-        cop_y_log.append(float(support_cop["cop_position"][1]))
-
-        L_log.append(state["L"].copy())
-        roll_delta_log.append(roll_delta)
-        swing_force_log.append(load_shift_metrics.swing_force)
-        support_force_log.append(load_shift_metrics.support_force)
+                log.foot_slip[link].append(np.nan)
+        log.cop_y.append(float(robot.get_contact_metrics(support_leg_link)["cop_position"][1]))
+        log.L.append(state["L"].copy())
+        log.roll_delta.append(roll_delta)
+        log.swing_force.append(load_shift_metrics.swing_force)
+        log.support_force.append(load_shift_metrics.support_force)
 
         # --- Periodic diagnostics ---
         if step % 500 == 0:
@@ -789,18 +787,10 @@ def main() -> None:
             cs = load_shift_metrics.com_shift_ratio
             print(f"[t={t:.2f}s] {phase_name:20s} sf={sf:.0f}N wf={wf:.0f}N ratio={sr:.3f} com_shift={cs:.3f} c_ref_y={c_ref[1]:.4f} c_y={c[1]:.4f}")
 
-    print_results(
-        com_log, com_ref_log, foot_force_log, foot_links,
-        initial_foot_pos, robot, phase_log, time_log, support_ratio_log,
-    )
+    print_results(log, robot, initial_foot_pos)
 
     plot_diagnostics(
-        time_log, com_log, com_ref_log, phase_log,
-        foot_force_log, foot_slip_log,
-        cop_y_log, L_log, roll_delta_log, swing_force_log,
-        support_force_log,
-        foot_links, robot.link_to_foot_name,
-        support_leg_link, swing_foot_link,
+        log, robot.link_to_foot_name, support_leg_link, swing_foot_link,
         rmse_thresh=RMSE_THRESH, slip_thresh=SLIP_THRESH,
         ds_min_force=cfg["ds_min_force"],
         load_shift_roll_delta=cfg["load_shift_roll_delta"],
