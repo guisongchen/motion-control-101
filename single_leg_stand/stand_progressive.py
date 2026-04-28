@@ -34,10 +34,7 @@ from phase_core import (
 from mpc import CentroidalMPC
 from wbc import WholeBodyController
 from direct_single_support import (
-    build_direct_pose,
     resolve_support_contact_local_positions,
-    yaw_from_rotation,
-    DIRECT_SINGLE_SUPPORT_CONFIG as direct_cfg,
 )
 from direct_single_support.primitives import (
     compute_corner_patch_force_reference,
@@ -302,13 +299,10 @@ def main() -> None:
         [initial_foot_pos[link][:2] for link in foot_links], axis=0
     )
 
-    support_contact_locals = resolve_corner_local_positions(robot, support_leg_link)
-    swing_contact_locals = resolve_corner_local_positions(robot, swing_foot_link)
-    initial_support_metrics = robot.get_contact_metrics(support_leg_link)
-    initial_support_contact = initial_support_metrics["position"].copy()
-    initial_support_yaw = yaw_from_rotation(
-        np.array(robot.data.xmat[support_leg_link]).reshape(3, 3)
-    )
+    support_leg_corner_locals = resolve_corner_local_positions(robot, support_leg_link)
+    swing_leg_corner_locals = resolve_corner_local_positions(robot, swing_foot_link)
+    support_leg_init_metrics = robot.get_contact_metrics(support_leg_link)
+    support_leg_init_contact = support_leg_init_metrics["position"].copy()
 
     # Single-support MPC and WBC
     mpc = CentroidalMPC()
@@ -324,10 +318,8 @@ def main() -> None:
     u_ref[2] = -GRAVITY[2] * robot.total_mass
     mpc.set_reference(x_ref, u_ref)
 
-    # Direct-pose for single-support reference
-    direct_pose = build_direct_pose(robot.dof_joint_names, support_leg)
     support_contact_local_positions = resolve_support_contact_local_positions(
-        robot, support_leg_link, initial_support_contact
+        robot, support_leg_link, support_leg_init_contact
     )
 
     mpc_force_target = u_ref.copy()
@@ -337,8 +329,8 @@ def main() -> None:
     ss_established = False
     ss_com_ref = None
     ss_joint_ref = None
-    filtered_cop_world = np.array(initial_support_metrics["cop_position"], copy=True)
-    filtered_support_pos = np.array(initial_support_metrics["position"], copy=True)
+    filtered_cop_world = np.array(support_leg_init_metrics["cop_position"], copy=True)
+    filtered_support_pos = np.array(support_leg_init_metrics["position"], copy=True)
 
     total_steps = int(cfg["sim_duration"] / DT_SIM)
 
@@ -588,8 +580,8 @@ def main() -> None:
                     swing_force = total_force * 0.5
                 swing_force_thresh = 80.0
                 include_swing = swing_force >= swing_force_thresh
-                active_locals = support_contact_locals + (swing_contact_locals if include_swing else [])
-                active_links = [support_leg_link] * len(support_contact_locals) + ([swing_foot_link] * len(swing_contact_locals) if include_swing else [])
+                active_locals = support_leg_corner_locals + (swing_leg_corner_locals if include_swing else [])
+                active_links = [support_leg_link] * len(support_leg_corner_locals) + ([swing_foot_link] * len(swing_leg_corner_locals) if include_swing else [])
                 n_contacts = len(active_locals)
                 wbc_ds = wbc_ds_4 if n_contacts <= 4 else wbc_ds_8
 
@@ -625,8 +617,8 @@ def main() -> None:
 
                 f_ref = np.zeros(3 * n_contacts)
                 total_fz = max(-GRAVITY[2] * robot.total_mass, 1e-6)
-                n_support = len(support_contact_locals)
-                n_swing_active = len(swing_contact_locals) if include_swing else 0
+                n_support = len(support_leg_corner_locals)
+                n_swing_active = len(swing_leg_corner_locals) if include_swing else 0
                 for i in range(n_support):
                     f_ref[3 * i + 2] = target_ratio * total_fz / n_support
                 for i in range(n_swing_active):
