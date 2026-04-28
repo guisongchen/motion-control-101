@@ -160,3 +160,99 @@ def compute_pd_torque(
     return np.clip(tau, -tau_limit, tau_limit)
 
 
+def plot_diagnostics(
+    time_log, com_log, com_ref_log, phase_log,
+    foot_force_log, foot_slip_log, cop_y_log, L_log, roll_delta_log,
+    swing_force_log, support_force_log, candidate_foot_links, link_to_foot_name,
+    support_foot_link, swing_foot_link,
+    rmse_thresh=0.02, slip_thresh=0.005,
+    ds_min_force=80.0, load_shift_roll_delta=0.07, ds_max_L_norm=0.5,
+):
+    """Multi-panel diagnostic plot with threshold reference lines."""
+    time_arr = np.array(time_log)
+    com_arr = np.stack(com_log)
+    com_ref_arr = np.stack(com_ref_log)
+    phase_arr = np.array(phase_log)
+    L_arr = np.stack(L_log)
+    n_phases = max(phase_arr)
+
+    phase_times = []
+    for p in range(1, n_phases + 1):
+        idx = np.where(phase_arr >= p)[0]
+        if len(idx) > 0:
+            phase_times.append(time_arr[idx[0]])
+
+    def vlines(ax):
+        for pt in phase_times:
+            ax.axvline(pt, color="gray", linestyle="--", alpha=0.4)
+
+    fig, axes = plt.subplots(6, 1, figsize=(12, 16), sharex=True)
+
+    ax = axes[0]
+    for i, label in enumerate(["x", "y", "z"]):
+        ax.plot(time_arr, com_arr[:, i] - com_ref_arr[:, i], label=label)
+    ax.axhline(0, color="k", linewidth=0.5)
+    ax.axhline(rmse_thresh, color="red", linestyle="--", alpha=0.5, label=f"±{rmse_thresh*1000:.0f} mm")
+    ax.axhline(-rmse_thresh, color="red", linestyle="--", alpha=0.5)
+    ax.set_ylabel("CoM error [m]")
+    ax.legend(loc="upper right")
+    ax.grid(True, alpha=0.3)
+    vlines(ax)
+
+    ax = axes[1]
+    ax.plot(time_arr, support_force_log, label=f"support force ({link_to_foot_name.get(support_foot_link, '')})", color="C0")
+    ax.plot(time_arr, swing_force_log, label=f"swing force ({link_to_foot_name.get(swing_foot_link, '')})", color="C1")
+    ax.axhline(0, color="gray", linestyle=":", alpha=0.3)
+    ax.axhline(ds_min_force, color="red", linestyle="--", alpha=0.6, label=f"min force ({ds_min_force} N)")
+    ax.set_ylabel("Foot force [N]")
+    ax.legend(loc="upper left")
+    ax.grid(True, alpha=0.3)
+    vlines(ax)
+
+    ax = axes[2]
+    slip_thresh_mm = slip_thresh * 1000.0
+    for link_id in candidate_foot_links:
+        slip = np.array(foot_slip_log[link_id]) * 1000.0
+        name = link_to_foot_name.get(link_id, f"link_{link_id}")
+        ax.plot(time_arr, slip, label=name)
+    ax.axhline(slip_thresh_mm, color="red", linestyle="--", alpha=0.6, label=f"slip limit ({slip_thresh_mm:.1f} mm)")
+    ax.set_ylabel("Foot slip [mm]")
+    ax.legend(loc="upper right")
+    ax.grid(True, alpha=0.3)
+    vlines(ax)
+
+    ax = axes[3]
+    ax.plot(time_arr, roll_delta_log, label="roll delta")
+    ax.axhline(0, color="gray", linestyle=":", alpha=0.3)
+    ax.axhline(load_shift_roll_delta, color="red", linestyle="--", alpha=0.5, label=f"±{load_shift_roll_delta:.3f} rad")
+    ax.axhline(-load_shift_roll_delta, color="red", linestyle="--", alpha=0.5)
+    ax.set_ylabel("Roll delta [rad]")
+    ax.legend(loc="upper right")
+    ax.grid(True, alpha=0.3)
+    vlines(ax)
+
+    ax = axes[4]
+    ax.plot(time_arr, cop_y_log, label="CoP y")
+    ax.axhline(0, color="gray", linestyle=":", alpha=0.3)
+    ax.set_ylabel("CoP y [m]")
+    ax.legend(loc="upper right")
+    ax.grid(True, alpha=0.3)
+    vlines(ax)
+
+    ax = axes[5]
+    for i, label in enumerate(["Lx", "Ly", "Lz"]):
+        ax.plot(time_arr, L_arr[:, i], label=label)
+    ax.axhline(0, color="k", linewidth=0.5)
+    ax.axhline(ds_max_L_norm, color="red", linestyle="--", alpha=0.5, label=f"±{ds_max_L_norm:.2f}")
+    ax.axhline(-ds_max_L_norm, color="red", linestyle="--", alpha=0.5)
+    ax.set_ylabel("Angular momentum")
+    ax.legend(loc="upper right")
+    ax.grid(True, alpha=0.3)
+    vlines(ax)
+
+    axes[-1].set_xlabel("Time [s]")
+    fig.suptitle("Diagnostics")
+    plt.tight_layout()
+    _save_figure(fig, "diagnostics.png")
+
+

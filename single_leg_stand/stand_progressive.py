@@ -44,11 +44,7 @@ from direct_single_support import (
 from direct_single_support.primitives import (
     compute_corner_patch_force_reference,
 )
-from utils import compute_rmse, compute_pd_torque, _save_figure
-
-import matplotlib
-matplotlib.use("Agg")  # double-check backend
-import matplotlib.pyplot as plt
+from utils import compute_rmse, compute_pd_torque, plot_diagnostics
 
 import wbc as wbc_module
 
@@ -227,106 +223,51 @@ def build_safe_targets(
     return targets, roll_delta
 
 
-def plot_diagnostics(
-    time_log, com_log, com_ref_log, phase_log,
-    foot_force_log, foot_slip_log, cop_y_log, L_log, roll_delta_log,
-    swing_force_log, support_force_log, candidate_foot_links, link_to_foot_name,
-    support_foot_link, swing_foot_link,
+def print_results(
+    com_log, com_ref_log, foot_force_log, candidate_foot_links,
+    initial_foot_pos, robot, phase_log, time_log, support_ratio_log,
 ):
-    """Multi-panel diagnostic plot with threshold reference lines."""
-    time_arr = np.array(time_log)
-    com_arr = np.stack(com_log)
-    com_ref_arr = np.stack(com_ref_log)
-    phase_arr = np.array(phase_log)
-    L_arr = np.stack(L_log)
-    n_phases = max(phase_arr)
+    print(f"\n{'='*60}")
+    print("===== RESULTS =====")
+    rmse = compute_rmse(com_log, com_ref_log)
+    print(f"CoM RMSE: {rmse:.4f} m (target < {RMSE_THRESH} m)")
+    max_slip = 0.0
+    final_foot_pos = {
+        link: robot.get_contact_metrics(link)["position"].copy()
+        for link in candidate_foot_links
+    }
+    for link in candidate_foot_links:
+        slip = np.linalg.norm(final_foot_pos[link][:2] - initial_foot_pos[link][:2])
+        max_slip = max(max_slip, slip)
+    print(f"Max foot slip: {max_slip*1000:.2f} mm (target < {SLIP_THRESH*1000:.1f} mm)")
+    for link in candidate_foot_links:
+        forces = np.array(foot_force_log[link])
+        avg_force = np.mean(forces) if len(forces) > 0 else 0.0
+        name = support_name(robot.link_to_foot_name, link)
+        print(f"  {name} avg force: {avg_force:.1f} N")
 
-    phase_times = []
-    for p in range(1, n_phases + 1):
-        idx = np.where(phase_arr >= p)[0]
-        if len(idx) > 0:
-            phase_times.append(time_arr[idx[0]])
-
-    def vlines(ax):
-        for pt in phase_times:
-            ax.axvline(pt, color="gray", linestyle="--", alpha=0.4)
-
-    fig, axes = plt.subplots(6, 1, figsize=(12, 16), sharex=True)
-
-    # 1. CoM tracking error  ──  ±RMSE_THRESH
-    ax = axes[0]
-    for i, label in enumerate(["x", "y", "z"]):
-        ax.plot(time_arr, com_arr[:, i] - com_ref_arr[:, i], label=label)
-    ax.axhline(0, color="k", linewidth=0.5)
-    ax.axhline(RMSE_THRESH, color="red", linestyle="--", alpha=0.5, label=f"±{RMSE_THRESH*1000:.0f} mm")
-    ax.axhline(-RMSE_THRESH, color="red", linestyle="--", alpha=0.5)
-    ax.set_ylabel("CoM error [m]")
-    ax.legend(loc="upper right")
-    ax.grid(True, alpha=0.3)
-    vlines(ax)
-
-    # 2. Foot forces  ──  ds_min_force
-    ax = axes[1]
-    ax.plot(time_arr, support_force_log, label=f"support force ({link_to_foot_name.get(support_foot_link, '')})", color="C0")
-    ax.plot(time_arr, swing_force_log, label=f"swing force ({link_to_foot_name.get(swing_foot_link, '')})", color="C1")
-    ax.axhline(0, color="gray", linestyle=":", alpha=0.3)
-    ax.axhline(PHASE_CONFIG["ds_min_force"], color="red", linestyle="--", alpha=0.6, label=f"min force ({PHASE_CONFIG['ds_min_force']} N)")
-    ax.set_ylabel("Foot force [N]")
-    ax.legend(loc="upper left")
-    ax.grid(True, alpha=0.3)
-    vlines(ax)
-
-    # 3. Foot slip  ──  SLIP_THRESH
-    ax = axes[2]
-    slip_thresh_mm = SLIP_THRESH * 1000.0
-    for link_id in candidate_foot_links:
-        slip = np.array(foot_slip_log[link_id]) * 1000.0
-        name = link_to_foot_name.get(link_id, f"link_{link_id}")
-        ax.plot(time_arr, slip, label=name)
-    ax.axhline(slip_thresh_mm, color="red", linestyle="--", alpha=0.6, label=f"slip limit ({slip_thresh_mm:.1f} mm)")
-    ax.set_ylabel("Foot slip [mm]")
-    ax.legend(loc="upper right")
-    ax.grid(True, alpha=0.3)
-    vlines(ax)
-
-    # 4. Roll delta  ──  ±load_shift_roll_delta
-    ax = axes[3]
-    ax.plot(time_arr, roll_delta_log, label="roll delta")
-    roll_limit = PHASE_CONFIG["load_shift_roll_delta"]
-    ax.axhline(0, color="gray", linestyle=":", alpha=0.3)
-    ax.axhline(roll_limit, color="red", linestyle="--", alpha=0.5, label=f"±{roll_limit:.3f} rad")
-    ax.axhline(-roll_limit, color="red", linestyle="--", alpha=0.5)
-    ax.set_ylabel("Roll delta [rad]")
-    ax.legend(loc="upper right")
-    ax.grid(True, alpha=0.3)
-    vlines(ax)
-
-    # 5. CoP y-position
-    ax = axes[4]
-    ax.plot(time_arr, cop_y_log, label="CoP y")
-    ax.axhline(0, color="gray", linestyle=":", alpha=0.3)
-    ax.set_ylabel("CoP y [m]")
-    ax.legend(loc="upper right")
-    ax.grid(True, alpha=0.3)
-    vlines(ax)
-
-    # 6. Angular momentum  ──  ±ds_max_L_norm
-    ax = axes[5]
-    for i, label in enumerate(["Lx", "Ly", "Lz"]):
-        ax.plot(time_arr, L_arr[:, i], label=label)
-    ax.axhline(0, color="k", linewidth=0.5)
-    L_thresh = PHASE_CONFIG["ds_max_L_norm"]
-    ax.axhline(L_thresh, color="red", linestyle="--", alpha=0.5, label=f"±{L_thresh:.2f}")
-    ax.axhline(-L_thresh, color="red", linestyle="--", alpha=0.5)
-    ax.set_ylabel("Angular momentum")
-    ax.legend(loc="upper right")
-    ax.grid(True, alpha=0.3)
-    vlines(ax)
-
-    axes[-1].set_xlabel("Time [s]")
-    fig.suptitle("Diagnostics")
-    plt.tight_layout()
-    _save_figure(fig, "diagnostics.png")
+    max_phase = max(phase_log)
+    print(f"\nHighest phase reached: {PhaseId(max_phase).name}")
+    if max_phase >= PhaseId.LOAD_SHIFT:
+        ls_ratios = []
+        ls_start = None
+        for i, p in enumerate(phase_log):
+            if p == PhaseId.LOAD_SHIFT and ls_start is None:
+                ls_start = time_log[i]
+            if p >= PhaseId.LOAD_SHIFT and ls_start is not None:
+                ls_ratios.append(support_ratio_log[i])
+        if ls_ratios:
+            print(f"  LOAD_SHIFT max ratio: {max(ls_ratios):.3f}, mean: {np.mean(ls_ratios):.3f}")
+    if max_phase >= PhaseId.PRE_LIFTOFF:
+        pl_ratios = []
+        pl_start = None
+        for i, p in enumerate(phase_log):
+            if p == PhaseId.PRE_LIFTOFF and pl_start is None:
+                pl_start = time_log[i]
+            if p >= PhaseId.PRE_LIFTOFF and pl_start is not None:
+                pl_ratios.append(support_ratio_log[i])
+        if pl_ratios:
+            print(f"  PRE_LIFTOFF max ratio: {max(pl_ratios):.3f}, mean: {np.mean(pl_ratios):.3f}")
 
 
 def main() -> None:
@@ -874,53 +815,10 @@ def main() -> None:
             cs = load_shift_metrics.com_shift_ratio
             print(f"[t={t:.2f}s] {phase_name:20s} sf={sf:.0f}N wf={wf:.0f}N ratio={sr:.3f} com_shift={cs:.3f} c_ref_y={c_ref[1]:.4f} c_y={c[1]:.4f}")
 
-    # --- Results ---
-    print(f"\n{'='*60}")
-    print("===== RESULTS =====")
-    rmse = compute_rmse(com_log, com_ref_log)
-    print(f"CoM RMSE: {rmse:.4f} m (target < {RMSE_THRESH} m)")
-    max_slip = 0.0
-    for link in candidate_foot_links:
-        positions = np.array([fp for fp in foot_force_log[link]])
-        if len(positions) > 0:
-            pass
-    max_slip = 0.0
-    final_foot_pos = {
-        link: robot.get_contact_metrics(link)["position"].copy()
-        for link in candidate_foot_links
-    }
-    for link in candidate_foot_links:
-        slip = np.linalg.norm(final_foot_pos[link][:2] - initial_foot_pos[link][:2])
-        max_slip = max(max_slip, slip)
-    print(f"Max foot slip: {max_slip*1000:.2f} mm (target < {SLIP_THRESH*1000:.1f} mm)")
-    for link in candidate_foot_links:
-        forces = np.array(foot_force_log[link])
-        avg_force = np.mean(forces) if len(forces) > 0 else 0.0
-        name = support_name(robot.link_to_foot_name, link)
-        print(f"  {name} avg force: {avg_force:.1f} N")
-
-    max_phase = max(phase_log)
-    print(f"\nHighest phase reached: {PhaseId(max_phase).name}")
-    if max_phase >= PhaseId.LOAD_SHIFT:
-        ls_start = None
-        ls_ratios = []
-        for i, p in enumerate(phase_log):
-            if p == PhaseId.LOAD_SHIFT and ls_start is None:
-                ls_start = time_log[i]
-            if p >= PhaseId.LOAD_SHIFT and ls_start is not None:
-                ls_ratios.append(support_ratio_log[i])
-        if ls_ratios:
-            print(f"  LOAD_SHIFT max ratio: {max(ls_ratios):.3f}, mean: {np.mean(ls_ratios):.3f}")
-    if max_phase >= PhaseId.PRE_LIFTOFF:
-        pl_start = None
-        pl_ratios = []
-        for i, p in enumerate(phase_log):
-            if p == PhaseId.PRE_LIFTOFF and pl_start is None:
-                pl_start = time_log[i]
-            if p >= PhaseId.PRE_LIFTOFF and pl_start is not None:
-                pl_ratios.append(support_ratio_log[i])
-        if pl_ratios:
-            print(f"  PRE_LIFTOFF max ratio: {max(pl_ratios):.3f}, mean: {np.mean(pl_ratios):.3f}")
+    print_results(
+        com_log, com_ref_log, foot_force_log, candidate_foot_links,
+        initial_foot_pos, robot, phase_log, time_log, support_ratio_log,
+    )
 
     plot_diagnostics(
         time_log, com_log, com_ref_log, phase_log,
@@ -929,6 +827,10 @@ def main() -> None:
         support_force_log,
         candidate_foot_links, robot.link_to_foot_name,
         preferred_support_foot_link, swing_foot_link,
+        rmse_thresh=RMSE_THRESH, slip_thresh=SLIP_THRESH,
+        ds_min_force=cfg["ds_min_force"],
+        load_shift_roll_delta=cfg["load_shift_roll_delta"],
+        ds_max_L_norm=cfg["ds_max_L_norm"],
     )
 
 
