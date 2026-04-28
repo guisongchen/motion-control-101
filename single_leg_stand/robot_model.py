@@ -110,6 +110,8 @@ class RobotModel:
             idx: name for name, idx in self.foot_name_to_link.items()
         }
 
+        self._sync_cache_valid = False
+
         self.reset_base_pose(np.asarray(base_position, dtype=float), np.asarray(base_orientation, dtype=float))
 
     @property
@@ -118,22 +120,49 @@ class RobotModel:
         return self._total_mass
 
     def _sync_state(self, q: Optional[np.ndarray] = None, v: Optional[np.ndarray] = None) -> None:
+        if self._sync_cache_valid:
+            need_forward = False
+            if q is not None:
+                q_arr = np.asarray(q, dtype=float)
+                quat = _quat_xyzw_to_wxyz(q_arr[3:7])
+                quat_norm = np.linalg.norm(quat)
+                if quat_norm == 0.0:
+                    raise ValueError("Base quaternion must be non-zero.")
+                quat /= quat_norm
+                if (not np.array_equal(self.data.qpos[:3], q_arr[:3]) or
+                    not np.array_equal(self.data.qpos[3:7], quat) or
+                    not np.array_equal(self.data.qpos[7:], q_arr[7:])):
+                    self.data.qpos[:3] = q_arr[:3]
+                    self.data.qpos[3:7] = quat
+                    self.data.qpos[7:] = q_arr[7:]
+                    need_forward = True
+            if v is not None and not need_forward:
+                v_arr = np.asarray(v, dtype=float)
+                if not np.array_equal(self.data.qvel, v_arr):
+                    self.data.qvel[:] = v_arr
+                    need_forward = True
+            if not need_forward:
+                return
+
         if q is not None:
-            q = np.asarray(q, dtype=float)
-            quat = _quat_xyzw_to_wxyz(q[3:7])
+            q_arr = np.asarray(q, dtype=float)
+            quat = _quat_xyzw_to_wxyz(q_arr[3:7])
             quat_norm = np.linalg.norm(quat)
             if quat_norm == 0.0:
                 raise ValueError("Base quaternion must be non-zero.")
             quat /= quat_norm
-
-            self.data.qpos[:3] = q[:3]
+            self.data.qpos[:3] = q_arr[:3]
             self.data.qpos[3:7] = quat
-            self.data.qpos[7:] = q[7:]
+            self.data.qpos[7:] = q_arr[7:]
 
         if v is not None:
             self.data.qvel[:] = np.asarray(v, dtype=float)
 
         mujoco.mj_forward(self.model, self.data)
+        self._sync_cache_valid = True
+
+    def _invalidate_sync_cache(self) -> None:
+        self._sync_cache_valid = False
 
     def _current_q(self) -> np.ndarray:
         q = np.zeros(self.nq)
@@ -152,6 +181,7 @@ class RobotModel:
         self.data.qpos[:] = qpos
         self.data.qvel[:] = qvel
         mujoco.mj_forward(self.model, self.data)
+        self._invalidate_sync_cache()
 
     def _centroidal_jacobian_fd(
         self, q: np.ndarray, quantity: str
@@ -161,18 +191,23 @@ class RobotModel:
         saved_qvel = np.array(self.data.qvel, copy=True)
 
         J = np.zeros((3, self.nv))
-        for dof in range(self.nv):
-            self.data.qvel[:] = 0.0
-            self.data.qvel[dof] = 1.0
-            mujoco.mj_forward(self.model, self.data)
-            mujoco.mj_subtreeVel(self.model, self.data)
-            if quantity == "com":
-                J[:, dof] = self.data.subtree_linvel[self.root_body_id]
-            elif quantity == "angular_momentum":
+        if quantity == "angular_momentum":
+            for dof in range(self.nv):
+                self.data.qvel[:] = 0.0
+                self.data.qvel[dof] = 1.0
+                mujoco.mj_subtreeVel(self.model, self.data)
                 J[:, dof] = self.data.subtree_angmom[self.root_body_id]
-            else:
-                self._restore_state(saved_qpos, saved_qvel)
-                raise ValueError(f"Unsupported centroidal quantity: {quantity}")
+        else:
+            for dof in range(self.nv):
+                self.data.qvel[:] = 0.0
+                self.data.qvel[dof] = 1.0
+                mujoco.mj_forward(self.model, self.data)
+                mujoco.mj_subtreeVel(self.model, self.data)
+                if quantity == "com":
+                    J[:, dof] = self.data.subtree_linvel[self.root_body_id]
+                else:
+                    self._restore_state(saved_qpos, saved_qvel)
+                    raise ValueError(f"Unsupported centroidal quantity: {quantity}")
 
         self._restore_state(saved_qpos, saved_qvel)
         return J
@@ -269,6 +304,7 @@ class RobotModel:
             self.data.qpos[qpos_adr] = float(joint_positions[dof_idx])
             self.data.qvel[qvel_adr] = 0.0
         mujoco.mj_forward(self.model, self.data)
+        self._invalidate_sync_cache()
 
     def reset_base_pose(self, position: np.ndarray, orientation: np.ndarray) -> None:
         """Reset floating-base pose and clear base velocity."""
@@ -279,6 +315,7 @@ class RobotModel:
         self.data.qvel[:6] = 0.0
         self.data.ctrl[:] = 0.0
         mujoco.mj_forward(self.model, self.data)
+        self._invalidate_sync_cache()
 
     def set_joint_torques(self, torques: np.ndarray) -> None:
         """Apply actuated-joint torques in DOF order."""
@@ -294,6 +331,7 @@ class RobotModel:
     def step(self) -> None:
         """Advance the MuJoCo simulation by one step."""
         mujoco.mj_step(self.model, self.data)
+        self._invalidate_sync_cache()
 
     def check_contact(self, link_index: int, other_body_id: int = 0) -> tuple[bool, float]:
         """Check whether a body contacts another body and sum its normal force."""

@@ -23,6 +23,7 @@ from config import (
     SLIP_THRESH,
     NX,
     NU,
+    WBC_FREQ,
 )
 from robot_model import RobotModel
 from robots.unitree_g1 import g1_config
@@ -396,6 +397,9 @@ def main() -> None:
     wbc_ss = WholeBodyController(robot.nv, num_contacts=4, contact_dim=3)
     wbc_ds_4 = WholeBodyController(robot.nv, num_contacts=4, contact_dim=3)
     wbc_ds_8 = WholeBodyController(robot.nv, num_contacts=8, contact_dim=3)
+    wbc_period = max(1, round(1.0 / (WBC_FREQ * DT_SIM)))
+    last_ds_wbc_tau = None
+    last_ss_wbc_tau = None
     x_ref = np.zeros(NX)
     x_ref[2] = measured_com_z
     u_ref = np.zeros(NU)
@@ -651,74 +655,78 @@ def main() -> None:
         if phase in (PhaseId.DOUBLE_SUPPORT_HOLD, PhaseId.LOAD_SHIFT, PhaseId.PRE_LIFTOFF):
             # DS WBC with corner-patch contacts per foot
             # Progressive: drop swing foot from WBC if its normal force is too low
-            support_force = 0.0
-            swing_force = 0.0
-            for fc in foot_contacts:
-                if fc["link"] == preferred_support_foot_link:
-                    support_force = fc["normal_force"]
-                elif fc["link"] == swing_foot_link:
-                    swing_force = fc["normal_force"]
-            total_force = support_force + swing_force
-            if total_force < 10.0:
-                total_force = -GRAVITY[2] * robot.total_mass
-                support_force = total_force * 0.5
-                swing_force = total_force * 0.5
-            swing_force_thresh = 80.0
-            include_swing = swing_force >= swing_force_thresh
-            active_locals = support_contact_locals + (swing_contact_locals if include_swing else [])
-            active_links = [preferred_support_foot_link] * len(support_contact_locals) + ([swing_foot_link] * len(swing_contact_locals) if include_swing else [])
-            n_contacts = len(active_locals)
-            wbc_ds = wbc_ds_4 if n_contacts <= 4 else wbc_ds_8
+            if step % wbc_period == 0 or last_ds_wbc_tau is None:
+                support_force = 0.0
+                swing_force = 0.0
+                for fc in foot_contacts:
+                    if fc["link"] == preferred_support_foot_link:
+                        support_force = fc["normal_force"]
+                    elif fc["link"] == swing_foot_link:
+                        swing_force = fc["normal_force"]
+                total_force = support_force + swing_force
+                if total_force < 10.0:
+                    total_force = -GRAVITY[2] * robot.total_mass
+                    support_force = total_force * 0.5
+                    swing_force = total_force * 0.5
+                swing_force_thresh = 80.0
+                include_swing = swing_force >= swing_force_thresh
+                active_locals = support_contact_locals + (swing_contact_locals if include_swing else [])
+                active_links = [preferred_support_foot_link] * len(support_contact_locals) + ([swing_foot_link] * len(swing_contact_locals) if include_swing else [])
+                n_contacts = len(active_locals)
+                wbc_ds = wbc_ds_4 if n_contacts <= 4 else wbc_ds_8
 
-            M = robot.compute_mass_matrix(q)
-            C = C_safe
+                M = robot.compute_mass_matrix(q)
+                Ci = C_safe
 
-            all_locals = active_locals
-            all_links = active_links
+                all_locals = active_locals
+                all_links = active_links
 
-            J_blocks = []
-            for local_pos, link in zip(all_locals, all_links):
-                J = robot.get_foot_jacobian(link, q, local_position=local_pos)
-                J_blocks.append(J[:3])
-            J_c = np.vstack(J_blocks)
-            Jc_dot = np.zeros_like(J_c)
-            J_com = robot.get_com_jacobian(q)
-            J_L = robot.get_angular_momentum_jacobian(q)
+                J_blocks = []
+                for local_pos, link in zip(all_locals, all_links):
+                    J = robot.get_foot_jacobian(link, q, local_position=local_pos)
+                    J_blocks.append(J[:3])
+                J_c = np.vstack(J_blocks)
+                Jc_dot = np.zeros_like(J_c)
+                J_com = robot.get_com_jacobian(q)
+                J_L = robot.get_angular_momentum_jacobian(q)
 
-            c_ddot_des = wbc_ds.compute_desired_acceleration(c_ref, c, c_dot_ref, c_dot, c_ddot_ref)
-            L_ref = np.zeros(3)
-            L_dot_ref = np.zeros(3)
-            L = state["L"]
-            L_dot_des = wbc_ds.compute_desired_momentum_rate(L_ref, L, L_dot_ref, np.zeros(3))
+                c_ddot_des = wbc_ds.compute_desired_acceleration(c_ref, c, c_dot_ref, c_dot, c_ddot_ref)
+                L_ref = np.zeros(3)
+                L_dot_ref = np.zeros(3)
+                L = state["L"]
+                L_dot_des = wbc_ds.compute_desired_momentum_rate(L_ref, L, L_dot_ref, np.zeros(3))
 
-            if phase == PhaseId.DOUBLE_SUPPORT_HOLD:
-                target_ratio = 0.5
-            elif phase == PhaseId.LOAD_SHIFT:
-                progress = smoothstep(elapsed / max(cfg["load_shift_time"], 1e-6))
-                target_ratio = 0.5 + progress * (cfg["load_shift_target_ratio"] - 0.5)
-            else:
-                progress = smoothstep(elapsed / max(cfg["pre_liftoff_time"], 1e-6))
-                target_ratio = cfg["load_shift_target_ratio"] + progress * (cfg["single_support_support_ratio"] - cfg["load_shift_target_ratio"])
+                if phase == PhaseId.DOUBLE_SUPPORT_HOLD:
+                    target_ratio = 0.5
+                elif phase == PhaseId.LOAD_SHIFT:
+                    progress = smoothstep(elapsed / max(cfg["load_shift_time"], 1e-6))
+                    target_ratio = 0.5 + progress * (cfg["load_shift_target_ratio"] - 0.5)
+                else:
+                    progress = smoothstep(elapsed / max(cfg["pre_liftoff_time"], 1e-6))
+                    target_ratio = cfg["load_shift_target_ratio"] + progress * (cfg["single_support_support_ratio"] - cfg["load_shift_target_ratio"])
 
-            f_ref = np.zeros(3 * n_contacts)
-            total_fz = max(-GRAVITY[2] * robot.total_mass, 1e-6)
-            n_support = len(support_contact_locals)
-            n_swing_active = len(swing_contact_locals) if include_swing else 0
-            for i in range(n_support):
-                f_ref[3 * i + 2] = target_ratio * total_fz / n_support
-            for i in range(n_swing_active):
-                f_ref[3 * (n_support + i) + 2] = (1.0 - target_ratio) * total_fz / n_swing_active
+                f_ref = np.zeros(3 * n_contacts)
+                total_fz = max(-GRAVITY[2] * robot.total_mass, 1e-6)
+                n_support = len(support_contact_locals)
+                n_swing_active = len(swing_contact_locals) if include_swing else 0
+                for i in range(n_support):
+                    f_ref[3 * i + 2] = target_ratio * total_fz / n_support
+                for i in range(n_swing_active):
+                    f_ref[3 * (n_support + i) + 2] = (1.0 - target_ratio) * total_fz / n_swing_active
 
-            wbc_result = wbc_ds.solve(
-                M, C, J_c, Jc_dot,
-                J_com, J_L,
-                c_ddot_des, L_dot_des,
-                f_ref, v,
-                tau_min_limits, tau_max_limits,
-            )
-            if wbc_result is not None:
+                wbc_result = wbc_ds.solve(
+                    M, Ci, J_c, Jc_dot,
+                    J_com, J_L,
+                    c_ddot_des, L_dot_des,
+                    f_ref, v,
+                    tau_min_limits, tau_max_limits,
+                )
+                if wbc_result is not None:
+                    last_ds_wbc_tau = wbc_result["tau"]
+
+            if last_ds_wbc_tau is not None:
                 blend = cfg["ds_posture_blend"]
-                applied_tau = (1.0 - blend) * wbc_result["tau"] + blend * safe_tau
+                applied_tau = (1.0 - blend) * last_ds_wbc_tau + blend * safe_tau
             else:
                 applied_tau = safe_tau.copy()
 
@@ -770,47 +778,52 @@ def main() -> None:
 
             # Single-support WBC
             if ss_established:
-                M = robot.compute_mass_matrix(q)
-                C = robot.compute_coriolis_gravity(q, v)
+                if step % wbc_period == 0 or last_ss_wbc_tau is None:
+                    M = robot.compute_mass_matrix(q)
+                    Ci = C_safe
 
-                J_blocks_ss = []
-                for local_pos in support_contact_local_positions:
-                    J = robot.get_foot_jacobian(preferred_support_foot_link, q, local_position=local_pos)
-                    J_blocks_ss.append(J[:3])
-                J_c_ss = np.vstack(J_blocks_ss)
-                Jc_dot_ss = np.zeros_like(J_c_ss)
-                J_com = robot.get_com_jacobian(q)
-                J_L = robot.get_angular_momentum_jacobian(q)
+                    J_blocks_ss = []
+                    for local_pos in support_contact_local_positions:
+                        J = robot.get_foot_jacobian(preferred_support_foot_link, q, local_position=local_pos)
+                        J_blocks_ss.append(J[:3])
+                    J_c_ss = np.vstack(J_blocks_ss)
+                    Jc_dot_ss = np.zeros_like(J_c_ss)
+                    J_com = robot.get_com_jacobian(q)
+                    J_L = robot.get_angular_momentum_jacobian(q)
 
-                c_ddot_des = wbc_ss.compute_desired_acceleration(c_ref_ss, c, c_dot_ref, c_dot, c_ddot_ref)
-                L_ref = np.zeros(3)
-                L_dot_ref = np.zeros(3)
-                L_dot_des = wbc_ss.compute_desired_momentum_rate(L_ref, state["L"], L_dot_ref, np.zeros(3))
+                    c_ddot_des = wbc_ss.compute_desired_acceleration(c_ref_ss, c, c_dot_ref, c_dot, c_ddot_ref)
+                    L_ref = np.zeros(3)
+                    L_dot_ref = np.zeros(3)
+                    L_dot_des = wbc_ss.compute_desired_momentum_rate(L_ref, state["L"], L_dot_ref, np.zeros(3))
 
-                total_fz = max(-GRAVITY[2] * robot.total_mass, 1e-6)
-                f_ref_ss = compute_corner_patch_force_reference(
-                    support_contact_local_positions,
-                    np.array(robot.data.xpos[preferred_support_foot_link], copy=True),
-                    np.array(robot.data.xmat[preferred_support_foot_link]).reshape(3, 3),
-                    filtered_cop_world,
-                    total_fz,
-                )
+                    total_fz_ss = max(-GRAVITY[2] * robot.total_mass, 1e-6)
+                    f_ref_ss = compute_corner_patch_force_reference(
+                        support_contact_local_positions,
+                        np.array(robot.data.xpos[preferred_support_foot_link], copy=True),
+                        np.array(robot.data.xmat[preferred_support_foot_link]).reshape(3, 3),
+                        filtered_cop_world,
+                        total_fz_ss,
+                    )
 
-                wbc_result_ss = wbc_ss.solve(
-                    M, C, J_c_ss, Jc_dot_ss,
-                    J_com, J_L,
-                    c_ddot_des, L_dot_des,
-                    f_ref_ss, v,
-                    tau_min_limits, tau_max_limits,
-                )
+                    wbc_result_ss = wbc_ss.solve(
+                        M, Ci, J_c_ss, Jc_dot_ss,
+                        J_com, J_L,
+                        c_ddot_des, L_dot_des,
+                        f_ref_ss, v,
+                        tau_min_limits, tau_max_limits,
+                    )
+                    if wbc_result_ss is not None:
+                        last_ss_wbc_tau = np.clip(wbc_result_ss["tau"], tau_min_limits, tau_max_limits)
+                elif last_ss_wbc_tau is None:
+                    last_ss_wbc_tau = safe_tau.copy()
 
             # Blend WBC with safe_tau
             support_mask = np.ones(robot.num_joints, dtype=bool)
             if swing_leg_dof_indices:
                 support_mask[np.array(swing_leg_dof_indices, dtype=int)] = False
 
-            if wbc_result_ss is not None:
-                tau_wbc = np.clip(wbc_result_ss["tau"], tau_min_limits, tau_max_limits)
+            if last_ss_wbc_tau is not None:
+                tau_wbc = last_ss_wbc_tau
                 last_valid_support_tau = tau_wbc[support_mask].copy()
             elif last_valid_support_tau is None:
                 last_valid_support_tau = safe_tau[support_mask].copy()
