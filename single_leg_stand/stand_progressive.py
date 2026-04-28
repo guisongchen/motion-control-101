@@ -335,6 +335,11 @@ def main() -> None:
         [initial_foot_pos[link][:2] for link in foot_links], axis=0
     )
 
+    support_xy = initial_foot_pos[support_leg_link][:2]
+    swing_xy = initial_foot_pos[swing_foot_link][:2]
+    stance_midpoint = 0.5 * (support_xy + swing_xy)
+    support_direction = support_xy - stance_midpoint
+
     support_leg_corner_locals = resolve_corner_local_positions(robot, support_leg_link)
     swing_leg_corner_locals = resolve_corner_local_positions(robot, swing_foot_link)
     support_leg_init_metrics = robot.get_contact_metrics(support_leg_link)
@@ -481,10 +486,6 @@ def main() -> None:
         # --- Compute c_ref (adaptive: smoothstep from phase-entry CoM toward target) ---
         c_dot_ref = np.zeros(3)
         c_ddot_ref = np.zeros(3)
-        support_xy = initial_foot_pos[support_leg_link][:2]
-        swing_xy = initial_foot_pos[swing_foot_link][:2]
-        stance_midpoint = 0.5 * (support_xy + swing_xy)
-        support_direction = support_xy - stance_midpoint
 
         c_ref = compute_c_ref(phase, elapsed, phase_entry_com_xy, nominal_c_ref,
                               stance_midpoint, support_direction, standing_com_z, cfg)

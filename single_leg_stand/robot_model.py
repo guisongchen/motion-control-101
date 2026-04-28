@@ -117,7 +117,9 @@ class RobotModel:
             idx: name for name, idx in self.foot_name_to_link.items()
         }
 
-        self._sync_cache_valid = False
+        self._synced_q = None
+        self._synced_v = None
+        self._needs_forward = True
 
         self.reset_base_pose(np.asarray(base_position, dtype=float), np.asarray(base_orientation, dtype=float))
 
@@ -127,31 +129,12 @@ class RobotModel:
         return self._total_mass
 
     def _sync_state(self, q: Optional[np.ndarray] = None, v: Optional[np.ndarray] = None) -> None:
-        if self._sync_cache_valid:
-            need_forward = False
-            if q is not None:
-                q_arr = np.asarray(q, dtype=float)
-                quat = _quat_xyzw_to_wxyz(q_arr[3:7])
-                quat_norm = np.linalg.norm(quat)
-                if quat_norm == 0.0:
-                    raise ValueError("Base quaternion must be non-zero.")
-                quat /= quat_norm
-                if (not np.array_equal(self.data.qpos[:3], q_arr[:3]) or
-                    not np.array_equal(self.data.qpos[3:7], quat) or
-                    not np.array_equal(self.data.qpos[7:], q_arr[7:])):
-                    self.data.qpos[:3] = q_arr[:3]
-                    self.data.qpos[3:7] = quat
-                    self.data.qpos[7:] = q_arr[7:]
-                    need_forward = True
-            if v is not None and not need_forward:
-                v_arr = np.asarray(v, dtype=float)
-                if not np.array_equal(self.data.qvel, v_arr):
-                    self.data.qvel[:] = v_arr
-                    need_forward = True
-            if not need_forward:
+        if not self._needs_forward:
+            if (q is None or q is self._synced_q) and (v is None or v is self._synced_v):
                 return
 
         if q is not None:
+            self._synced_q = q
             q_arr = np.asarray(q, dtype=float)
             quat = _quat_xyzw_to_wxyz(q_arr[3:7])
             quat_norm = np.linalg.norm(quat)
@@ -163,13 +146,14 @@ class RobotModel:
             self.data.qpos[7:] = q_arr[7:]
 
         if v is not None:
+            self._synced_v = v
             self.data.qvel[:] = np.asarray(v, dtype=float)
 
         mujoco.mj_forward(self.model, self.data)
-        self._sync_cache_valid = True
+        self._needs_forward = False
 
     def _invalidate_sync_cache(self) -> None:
-        self._sync_cache_valid = False
+        self._needs_forward = True
 
     def _current_q(self) -> np.ndarray:
         q = np.zeros(self.nq)
