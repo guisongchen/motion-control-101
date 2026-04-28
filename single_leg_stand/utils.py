@@ -98,31 +98,6 @@ def setup_logger(name: str = "motion_control", level: int = logging.INFO) -> log
     return logger
 
 
-def plot_com_tracking(time_log: List[float],
-                      com_log: List[np.ndarray],
-                      com_ref_log: List[np.ndarray]):
-    """绘制 CoM 跟踪曲线。"""
-    time_arr = np.array(time_log)
-    com_arr = np.stack(com_log)
-    com_ref_arr = np.stack(com_ref_log)
-
-    fig, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
-    labels = ["x", "y", "z"]
-    colors = ["C0", "C1", "C2"]
-
-    for i, (ax, label, color) in enumerate(zip(axes, labels, colors)):
-        ax.plot(time_arr, com_arr[:, i], color=color, label=f"actual {label}")
-        ax.plot(time_arr, com_ref_arr[:, i], color=color, linestyle="--", label=f"ref {label}")
-        ax.set_ylabel(f"CoM {label} [m]")
-        ax.legend(loc="upper right")
-        ax.grid(True, alpha=0.3)
-
-    axes[-1].set_xlabel("Time [s]")
-    fig.suptitle("CoM Tracking")
-    plt.tight_layout()
-    _save_figure(fig, "com_tracking.png")
-
-
 def plot_contact_force(time_log: List[float],
                        force_log: List[np.ndarray]):
     """绘制接触力曲线。"""

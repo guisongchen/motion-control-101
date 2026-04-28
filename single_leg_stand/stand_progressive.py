@@ -28,13 +28,10 @@ from config import (
 from robot_model import RobotModel
 from robots.unitree_g1 import g1_config
 from state_estimator import StateEstimator
-from phase_metrics import compute_load_shift_metrics
 from phase_core import (
-    ControlPhase,
     StabilityGate,
     get_contact_entry,
     support_name,
-    skew,
 )
 from mpc import CentroidalMPC
 from wbc import WholeBodyController
@@ -46,10 +43,8 @@ from direct_single_support import (
 )
 from direct_single_support.primitives import (
     compute_corner_patch_force_reference,
-    build_corner_patch_wrench_task,
-    apply_measured_cop_feedback,
 )
-from utils import compute_rmse, compute_pd_torque, plot_com_tracking, _save_figure
+from utils import compute_rmse, compute_pd_torque, _save_figure
 
 import matplotlib
 matplotlib.use("Agg")  # double-check backend
@@ -926,8 +921,6 @@ def main() -> None:
                 pl_ratios.append(support_ratio_log[i])
         if pl_ratios:
             print(f"  PRE_LIFTOFF max ratio: {max(pl_ratios):.3f}, mean: {np.mean(pl_ratios):.3f}")
-
-    plot_com_tracking(time_log, com_log, com_ref_log)
 
     plot_diagnostics(
         time_log, com_log, com_ref_log, phase_log,
