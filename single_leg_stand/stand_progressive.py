@@ -296,20 +296,18 @@ def compute_roll_delta(
 
 def compute_c_ref(phase, elapsed, phase_entry_com_xy, nominal_c_ref,
                   stance_midpoint, support_direction, standing_com_z, cfg):
+    c_ref = nominal_c_ref.copy()
     if phase <= PhaseId.DOUBLE_SUPPORT_HOLD:
-        c_ref = nominal_c_ref.copy()
+        pass
     elif phase == PhaseId.LOAD_SHIFT:
         progress = smoothstep(elapsed / max(cfg["load_shift_time"], 1e-6))
         target_xy = stance_midpoint + cfg["load_shift_target_ratio"] * support_direction
-        c_ref = nominal_c_ref.copy()
         c_ref[:2] = (1.0 - progress) * phase_entry_com_xy + progress * target_xy
     elif phase == PhaseId.PRE_LIFTOFF:
         progress = smoothstep(elapsed / max(cfg["pre_liftoff_time"], 1e-6))
         target_xy = stance_midpoint + cfg["single_support_support_ratio"] * support_direction
-        c_ref = nominal_c_ref.copy()
         c_ref[:2] = (1.0 - progress) * phase_entry_com_xy + progress * target_xy
     else:
-        c_ref = nominal_c_ref.copy()
         c_ref[:2] = phase_entry_com_xy
     if standing_com_z is not None:
         c_ref[2] = standing_com_z
