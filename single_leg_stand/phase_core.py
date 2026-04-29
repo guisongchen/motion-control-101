@@ -51,9 +51,22 @@ def compute_centroidal_dynamics(
     return A_d, B_d, d_d
 
 
-def get_contact_entry(foot_contacts: list[dict], link: int) -> Optional[dict]:
-    """Return the contact record for one foot link."""
-    return next((fc for fc in foot_contacts if fc["link"] == link), None)
+def is_com_inside_support_polygon(c: np.ndarray, corners_xy: list[np.ndarray], margin: float) -> bool:
+    if not corners_xy:
+        return False
+    xs = [float(p[0]) for p in corners_xy]
+    ys = [float(p[1]) for p in corners_xy]
+    return (
+        float(c[0]) >= min(xs) + margin
+        and float(c[0]) <= max(xs) - margin
+        and float(c[1]) >= min(ys) + margin
+        and float(c[1]) <= max(ys) - margin
+    )
+
+
+def get_contacts(foot_contacts: list[dict]) -> dict[int, dict]:
+    """Return all contacts keyed by link id so callers look up once."""
+    return {fc["link"]: fc for fc in foot_contacts}
 
 
 def support_name(foot_name_map: dict[int, str], link: int) -> str:

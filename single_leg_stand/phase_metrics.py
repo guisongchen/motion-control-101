@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from config import MIN_SUPPORT_FORCE, SLIP_THRESH
-from phase_core import get_contact_entry
+from phase_core import get_contacts
 
 
 @dataclass
@@ -32,8 +32,9 @@ def compute_load_shift_metrics(
     initial_foot_pos: dict[int, np.ndarray],
 ) -> LoadShiftMetrics:
     """Measure whether weight has actually moved onto the intended support foot."""
-    support_contact = get_contact_entry(foot_contacts, support_foot_link)
-    swing_contact = get_contact_entry(foot_contacts, swing_foot_link)
+    contacts = get_contacts(foot_contacts)
+    support_contact = contacts.get(support_foot_link)
+    swing_contact = contacts.get(swing_foot_link)
     support_force = support_contact["normal_force"] if support_contact is not None else 0.0
     swing_force = swing_contact["normal_force"] if swing_contact is not None else 0.0
     total_force = max(support_force + swing_force, 1e-6)

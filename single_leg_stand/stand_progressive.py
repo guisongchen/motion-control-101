@@ -28,7 +28,8 @@ from robots.unitree_g1 import g1_config
 from state_estimator import StateEstimator
 from phase_core import (
     StabilityGate,
-    get_contact_entry,
+    get_contacts,
+    is_com_inside_support_polygon,
     support_name,
 )
 from mpc import CentroidalMPC
@@ -461,7 +462,8 @@ class SingleSupportController:
         swing_leg_dof_indices, cfg,
     ):
         ss_elapsed = t - phase_start_time
-        support_contact = get_contact_entry(foot_contacts, support_leg_link)
+        contacts = get_contacts(foot_contacts)
+        support_contact = contacts.get(support_leg_link)
         measured_support_point = (
             support_contact["position"].copy()
             if support_contact is not None
@@ -662,7 +664,6 @@ def main() -> None:
         v = state["v"]
         joint_positions = q[nq_base:]
         joint_velocities = v[nv_base:]
-        support_foot_link = state["support_foot_link"]
         foot_contacts = state["foot_contacts"]
         load_shift_metrics = state["load_shift_metrics"]
         elapsed = t - phase_start_time
@@ -675,41 +676,26 @@ def main() -> None:
                 next_phase = PhaseId.DOUBLE_SUPPORT_HOLD
 
         elif phase == PhaseId.DOUBLE_SUPPORT_HOLD:
-            double_support_forces = [
-                get_contact_entry(foot_contacts, link)["normal_force"]
-                if get_contact_entry(foot_contacts, link) is not None else 0.0
-                for link in foot_links
-            ]
-            max_slip = max(
-                np.linalg.norm(
-                    get_contact_entry(foot_contacts, link)["position"][:2]
-                    - initial_foot_pos[link][:2]
-                )
-                for link in foot_links
-            )
-            com_vel_ok = float(np.linalg.norm(c_dot)) <= cfg["ds_max_com_vel"]
-            L = state["L"]
-            momentum_ok = float(np.linalg.norm(L)) <= cfg["ds_max_L_norm"]
-            total_force = sum(double_support_forces)
-            balanced = False
-            if total_force > 1e-6:
-                balanced = (min(double_support_forces) / total_force) >= cfg["ds_force_ratio_min"]
+            contacts = get_contacts(foot_contacts)
+            forces = [contacts[link]["normal_force"] for link in foot_links]
+            total_force = sum(forces)
+
             corners_xy: list[np.ndarray] = []
             for link in foot_links:
                 corners_xy.extend(compute_foot_corners_world_xy(robot, link))
-            com_inside = False
-            if corners_xy:
-                xs = [float(p[0]) for p in corners_xy]
-                ys = [float(p[1]) for p in corners_xy]
-                com_inside = (
-                    float(c[0]) >= min(xs) + cfg["ds_com_margin"]
-                    and float(c[0]) <= max(xs) - cfg["ds_com_margin"]
-                    and float(c[1]) >= min(ys) + cfg["ds_com_margin"]
-                    and float(c[1]) <= max(ys) - cfg["ds_com_margin"]
-                )
-            all_forces_ok = all(f >= cfg["ds_min_force"] for f in double_support_forces)
-            stable = all_forces_ok and max_slip <= SLIP_THRESH and com_vel_ok and momentum_ok and balanced and com_inside
-            if ds_gate.check(stable, t, cfg["ds_ready_time"]):
+
+            checks = {
+                "forces_ok": all(f >= cfg["ds_min_force"] for f in forces),
+                "balanced": total_force > 1e-6 and (min(forces) / total_force) >= cfg["ds_force_ratio_min"],
+                "slip_ok": max(
+                    np.linalg.norm(contacts[link]["position"][:2] - initial_foot_pos[link][:2])
+                    for link in foot_links
+                ) <= SLIP_THRESH,
+                "com_vel_ok": float(np.linalg.norm(c_dot)) <= cfg["ds_max_com_vel"],
+                "momentum_ok": float(np.linalg.norm(state["L"])) <= cfg["ds_max_L_norm"],
+                "com_inside": is_com_inside_support_polygon(c, corners_xy, cfg["ds_com_margin"]),
+            }
+            if ds_gate.check(all(checks.values()), t, cfg["ds_ready_time"]):
                 next_phase = PhaseId.LOAD_SHIFT
 
         elif phase == PhaseId.LOAD_SHIFT:
@@ -723,14 +709,18 @@ def main() -> None:
                 next_phase = PhaseId.PRE_LIFTOFF
 
         elif phase == PhaseId.PRE_LIFTOFF:
-            elapsed_ok = elapsed >= cfg["pre_liftoff_time"]
-            ratio_ok = load_shift_metrics.support_ratio >= cfg["pre_liftoff_ratio_min"]
-            speed_ok = load_shift_metrics.com_speed <= cfg["com_vel_ready_thresh"]
-            force_ok = load_shift_metrics.swing_force < cfg["pre_liftoff_swing_force_max"]
-            # Also allow transition after extended time if ratio is decent
-            time_fallback = elapsed >= cfg["pre_liftoff_time"] * 2 and load_shift_metrics.support_ratio >= 0.55
-            checks = elapsed_ok and (ratio_ok or time_fallback) and speed_ok and force_ok
-            if pl_gate.check(checks, t, 0.10):
+            ratio_met = load_shift_metrics.support_ratio >= cfg["pre_liftoff_ratio_min"]
+            ratio_fallback = (
+                elapsed >= cfg["pre_liftoff_time"] * 2
+                and load_shift_metrics.support_ratio >= 0.55
+            )
+            checks = {
+                "time_ok": elapsed >= cfg["pre_liftoff_time"],
+                "ratio_ok": ratio_met or ratio_fallback,
+                "speed_ok": load_shift_metrics.com_speed <= cfg["com_vel_ready_thresh"],
+                "force_ok": load_shift_metrics.swing_force < cfg["pre_liftoff_swing_force_max"],
+            }
+            if pl_gate.check(all(checks.values()), t, 0.10):
                 next_phase = PhaseId.SINGLE_SUPPORT
 
         if next_phase is not None:
@@ -738,12 +728,7 @@ def main() -> None:
             phase_start_time = t
             phase_entry_com_xy = c[:2].copy()
             print(f"[PHASE] t={t:.3f}s -> {PhaseId(phase).name}")
-            if phase == PhaseId.DOUBLE_SUPPORT_HOLD:
-                standing_com_z = float(c[2])
-            elif phase == PhaseId.LOAD_SHIFT:
-                standing_com_z = float(c[2])
-            elif phase == PhaseId.SINGLE_SUPPORT:
-                standing_com_z = float(c[2])
+            standing_com_z = float(c[2])
 
         # --- Compute c_ref (adaptive: smoothstep from phase-entry CoM toward target) ---
         c_dot_ref = np.zeros(3)
