@@ -83,13 +83,13 @@ PHASE_CONFIG = {
     "ds_com_margin": 0.02,
     "load_shift_time": 1.50,
     "load_shift_target_ratio": 0.72,
-    "load_shift_ratio_min": 0.55,
+    "load_shift_ratio_min": 0.53,
     "load_shift_com_ratio": 0.35,
-    "load_shift_roll_delta": 0.07,
+    "load_shift_roll_delta": 0.10,
     "load_shift_swing_force_min": 25.0,
     "com_vel_ready_thresh": 0.35,
     "pre_liftoff_time": 1.00,
-    "pre_liftoff_ratio_min": 0.60,
+    "pre_liftoff_ratio_min": 0.55,
     "pre_liftoff_com_ratio": 0.55,
     "pre_liftoff_extra_roll_delta": 0.04,
     "pre_liftoff_swing_force_max": 150.0,
@@ -108,6 +108,11 @@ PHASE_CONFIG = {
     "ds_force_weight_z": 100.0,
     "ds_load_dist_weight": 3000.0,
     "ds_posture_blend": 0.50,
+    "ds_shift_posture_blend": 0.40,
+    "adaptive_ratio_span": 0.10,
+    "ds_force_ratio_cap": 0.85,
+    "ds_force_target_margin": 0.05,
+    "ds_force_desired_factor": 0.0,
     "posture_kp": 120.0,
     "posture_kd": 16.0,
     "lift_leg_kp": 120.0,
@@ -269,11 +274,13 @@ def compute_roll_delta(
     if phase_id < PhaseId.LOAD_SHIFT:
         return 0.0
 
-    ratio_error = max(0.0, cfg["load_shift_target_ratio"] - load_shift_metrics.support_ratio)
+    elapsed = t - phase_start_time
+    desired = desired_support_ratio(phase_id, elapsed, cfg)
+    ratio_error = max(0.0, desired - load_shift_metrics.support_ratio)
     com_error = max(0.0, cfg["load_shift_com_ratio"] - load_shift_metrics.com_shift_ratio)
     roll_feedback = cfg["load_shift_roll_delta"] * min(
         1.0,
-        8.0 * (0.7 * ratio_error / max(cfg["load_shift_target_ratio"], 1e-6)
+        8.0 * (0.7 * ratio_error / max(desired, 1e-6)
                 + 0.3 * com_error / max(cfg["load_shift_com_ratio"], 1e-6)),
     )
     slip_scale = max(0.0, 1.0 - load_shift_metrics.swing_slip / max(SLIP_THRESH, 1e-6))
@@ -294,18 +301,33 @@ def compute_roll_delta(
     return roll_delta
 
 
+def desired_support_ratio(phase, elapsed, cfg):
+    if phase <= PhaseId.DOUBLE_SUPPORT_HOLD:
+        return 0.5
+    if phase == PhaseId.LOAD_SHIFT:
+        progress = np.clip(elapsed / max(cfg["load_shift_time"], 1e-6), 0.0, 1.0)
+        return 0.5 + progress * cfg.get("adaptive_ratio_span", 0.45)
+    if phase == PhaseId.PRE_LIFTOFF:
+        progress = np.clip(elapsed / max(cfg["pre_liftoff_time"], 1e-6), 0.0, 1.0)
+        start = 0.5 + cfg.get("adaptive_ratio_span", 0.45)
+        return start + progress * (0.98 - start)
+    return 0.98
+
+
 def compute_c_ref(phase, elapsed, phase_entry_com_xy, nominal_c_ref,
                   stance_midpoint, support_direction, standing_com_z, cfg):
     c_ref = nominal_c_ref.copy()
     if phase <= PhaseId.DOUBLE_SUPPORT_HOLD:
         pass
-    elif phase == PhaseId.LOAD_SHIFT:
-        progress = smoothstep(elapsed / max(cfg["load_shift_time"], 1e-6))
-        target_xy = stance_midpoint + cfg["load_shift_target_ratio"] * support_direction
-        c_ref[:2] = (1.0 - progress) * phase_entry_com_xy + progress * target_xy
-    elif phase == PhaseId.PRE_LIFTOFF:
-        progress = smoothstep(elapsed / max(cfg["pre_liftoff_time"], 1e-6))
-        target_xy = stance_midpoint + cfg["single_support_support_ratio"] * support_direction
+    elif phase in (PhaseId.LOAD_SHIFT, PhaseId.PRE_LIFTOFF):
+        if phase == PhaseId.LOAD_SHIFT:
+            t_total = max(cfg["load_shift_time"], 1e-6)
+        else:
+            t_total = max(cfg["pre_liftoff_time"], 1e-6)
+        progress = smoothstep(elapsed / t_total)
+        desired = desired_support_ratio(phase, elapsed, cfg)
+        target_shift_ratio = 2.0 * max(0.0, desired - 0.5)
+        target_xy = stance_midpoint + target_shift_ratio * support_direction
         c_ref[:2] = (1.0 - progress) * phase_entry_com_xy + progress * target_xy
     else:
         c_ref[:2] = phase_entry_com_xy
@@ -364,11 +386,11 @@ def compute_ds_applied_tau(
     support_leg_corner_locals, swing_leg_corner_locals,
     q, v, C_safe, wbc_ds_4, wbc_ds_8,
     c_ref, c, c_dot_ref, c_dot, c_ddot_ref, L,
-    phase, elapsed, cfg,
+    phase, elapsed, cfg, com_shift_ratio,
     tau_min_limits, tau_max_limits, safe_tau,
 ):
     if step % wbc_period != 0 and last_ds_wbc_tau is not None:
-        blend = cfg["ds_posture_blend"]
+        blend = cfg["ds_posture_blend"] if phase == PhaseId.DOUBLE_SUPPORT_HOLD else cfg.get("ds_shift_posture_blend", 0.25)
         return (1.0 - blend) * last_ds_wbc_tau + blend * safe_tau, last_ds_wbc_tau
 
     support_force = 0.0
@@ -407,12 +429,13 @@ def compute_ds_applied_tau(
 
     if phase == PhaseId.DOUBLE_SUPPORT_HOLD:
         target_ratio = 0.5
-    elif phase == PhaseId.LOAD_SHIFT:
-        progress = smoothstep(elapsed / max(cfg["load_shift_time"], 1e-6))
-        target_ratio = 0.5 + progress * (cfg["load_shift_target_ratio"] - 0.5)
     else:
-        progress = smoothstep(elapsed / max(cfg["pre_liftoff_time"], 1e-6))
-        target_ratio = cfg["load_shift_target_ratio"] + progress * (cfg["single_support_support_ratio"] - cfg["load_shift_target_ratio"])
+        com_shift_clipped = max(0.0, com_shift_ratio)
+        physical_target = 0.5 + 0.5 * com_shift_clipped + cfg.get("ds_force_target_margin", 0.05)
+        desired = desired_support_ratio(phase, elapsed, cfg)
+        desired_push = 0.5 + cfg.get("ds_force_desired_factor", 0.3) * (desired - 0.5)
+        target_ratio = max(physical_target, desired_push)
+        target_ratio = min(target_ratio, cfg.get("ds_force_ratio_cap", 0.95))
 
     f_ref = np.zeros(3 * n_contacts)
     total_fz = max(-GRAVITY[2] * robot.total_mass, 1e-6)
@@ -433,7 +456,7 @@ def compute_ds_applied_tau(
     if wbc_result is not None:
         last_ds_wbc_tau = wbc_result["tau"]
 
-    blend = cfg["ds_posture_blend"]
+    blend = cfg["ds_posture_blend"] if phase == PhaseId.DOUBLE_SUPPORT_HOLD else cfg.get("ds_shift_posture_blend", 0.25)
     return (1.0 - blend) * last_ds_wbc_tau + blend * safe_tau, last_ds_wbc_tau
 
 
@@ -475,7 +498,7 @@ class SingleSupportController:
             support_metrics_now = self.robot.get_contact_metrics(support_leg_link)
             if support_metrics_now["normal_force"] >= cfg["single_support_hold_force"]:
                 self.ss_established = True
-                self.ss_com_ref = c.copy()
+                self.ss_com_ref = c_ref.copy()
                 self.ss_com_ref[2] = standing_com_z if standing_com_z is not None else c_ref[2]
                 self.filtered_cop_world = np.array(support_metrics_now["cop_position"], copy=True)
 
@@ -724,16 +747,21 @@ def main() -> None:
         if next_phase is not None:
             phase = next_phase
             phase_start_time = t
-            phase_entry_com_xy = c[:2].copy()
-            print(f"[PHASE] t={t:.3f}s -> {PhaseId(phase).name}")
+            if next_phase == PhaseId.SINGLE_SUPPORT:
+                phase_entry_com_xy = stance_midpoint + 0.95 * support_direction
+            else:
+                phase_entry_com_xy = c[:2].copy()
             standing_com_z = float(c[2])
+            print(f"[PHASE] t={t:.3f}s -> {PhaseId(phase).name}")
 
-        # --- Compute c_ref (adaptive: smoothstep from phase-entry CoM toward target) ---
+        # --- Compute c_ref
         c_dot_ref = np.zeros(3)
         c_ddot_ref = np.zeros(3)
 
-        c_ref = compute_c_ref(phase, elapsed, phase_entry_com_xy, nominal_c_ref,
-                              stance_midpoint, support_direction, standing_com_z, cfg)
+        c_ref = compute_c_ref(
+            phase, elapsed, phase_entry_com_xy, nominal_c_ref,
+            stance_midpoint, support_direction, standing_com_z, cfg,
+        )
 
         # --- Compute safe_tau (PD posture + C_bias) ---
         C_safe = robot.compute_coriolis_gravity(q, v)
@@ -757,6 +785,7 @@ def main() -> None:
                 q, v, C_safe, wbc_ds_4, wbc_ds_8,
                 c_ref, c, c_dot_ref, c_dot, c_ddot_ref, state["L"],
                 phase, elapsed, cfg,
+                load_shift_metrics.com_shift_ratio,
                 tau_min_limits, tau_max_limits, safe_tau,
             )
 
