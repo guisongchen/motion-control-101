@@ -83,15 +83,15 @@ PHASE_CONFIG = {
     "ds_com_margin": 0.02,
     "load_shift_time": 1.50,
     "load_shift_target_ratio": 0.72,
-    "load_shift_ratio_min": 0.53,
-    "load_shift_com_ratio": 0.35,
-    "load_shift_roll_delta": 0.10,
+    "load_shift_ratio_min": 0.55,
+    "load_shift_com_ratio": 0.25,
+    "load_shift_roll_delta": 0.06,
     "load_shift_swing_force_min": 25.0,
     "com_vel_ready_thresh": 0.35,
-    "pre_liftoff_time": 1.00,
+    "pre_liftoff_time": 1.50,
     "pre_liftoff_ratio_min": 0.55,
     "pre_liftoff_com_ratio": 0.55,
-    "pre_liftoff_extra_roll_delta": 0.04,
+    "pre_liftoff_extra_roll_delta": 0.03,
     "pre_liftoff_swing_force_max": 150.0,
     "single_support_entry_time": 0.60,
     "single_support_hold_force": 15.0,
@@ -108,22 +108,46 @@ PHASE_CONFIG = {
     "ds_force_weight_z": 100.0,
     "ds_load_dist_weight": 3000.0,
     "ds_posture_blend": 0.50,
-    "ds_shift_posture_blend": 0.40,
+    "ds_shift_posture_blend": 0.60,
     "adaptive_ratio_span": 0.10,
     "ds_force_ratio_cap": 0.85,
     "ds_force_target_margin": 0.05,
     "ds_force_desired_factor": 0.0,
-    "posture_kp": 120.0,
-    "posture_kd": 16.0,
+    "posture_kp": 160.0,
+    "posture_kd": 28.0,
     "lift_leg_kp": 120.0,
     "lift_leg_kd": 8.0,
-    "sim_duration": 15.0,
+    "sim_duration": 20.0,
 }
+
+
 
 
 def smoothstep(t: float) -> float:
     t = float(np.clip(t, 0.0, 1.0))
     return t * t * (3.0 - 2.0 * t)
+
+
+def plan_lipm_trajectory(x0, x_target, T, omega, dt):
+    n = max(int(T / dt) + 1, 2)
+    times = np.linspace(0, T, n)
+    x_pos = np.zeros(n)
+    x_vel = np.zeros(n)
+    x_acc = np.zeros(n)
+
+    dx = x_target - x0
+
+    for i, t in enumerate(times):
+        s = t / T
+        q0 = 10.0 * s**3 - 15.0 * s**4 + 6.0 * s**5
+        q1 = 30.0 * s**2 - 60.0 * s**3 + 30.0 * s**4
+        q2 = 60.0 * s - 180.0 * s**2 + 120.0 * s**3
+
+        x_pos[i] = x0 + dx * q0
+        x_vel[i] = dx / T * q1
+        x_acc[i] = dx / T**2 * q2
+
+    return times, x_pos, x_vel, x_acc
 
 
 def compute_foot_corners_world_xy(robot: RobotModel, link: int) -> list[np.ndarray]:
@@ -186,16 +210,18 @@ def resolve_corner_local_positions(robot: RobotModel, link: int) -> list[np.ndar
     return sorted(local_positions, key=lambda pos: (pos[0], pos[1]))
 
 
-def apply_roll_shift_offset(targets, joint_name_to_dof_idx, support_leg, delta):
+def apply_roll_shift_offset(targets, joint_name_to_dof_idx, support_leg, delta, nv_base):
+    _ = nv_base
     support_sign = 1.0 if support_leg == "right" else -1.0
-    roll_delta = support_sign * delta
     for leg in ("left", "right"):
         name = f"{leg}_hip_roll_joint"
         if name in joint_name_to_dof_idx:
-            targets[joint_name_to_dof_idx[name]] += roll_delta
+            idx = joint_name_to_dof_idx[name]
+            targets[idx] += support_sign * delta
         name = f"{leg}_ankle_roll_joint"
         if name in joint_name_to_dof_idx:
-            targets[joint_name_to_dof_idx[name]] -= roll_delta
+            idx = joint_name_to_dof_idx[name]
+            targets[idx] += -support_sign * delta
 
 
 def compute_swing_progress(elapsed, phase, cfg):
@@ -216,7 +242,7 @@ def compute_safe_tau(
 ) -> np.ndarray:
     safe_targets = initial_dof_angles.copy()
     if roll_delta != 0.0:
-        apply_roll_shift_offset(safe_targets, joint_name_to_dof_idx, support_leg, roll_delta)
+        apply_roll_shift_offset(safe_targets, joint_name_to_dof_idx, support_leg, roll_delta, nv_base)
     safe_tau = C_safe[6:] + compute_pd_torque(
         safe_targets, joint_positions, joint_velocities,
         cfg["posture_kp"], cfg["posture_kd"], tau_max_limits,
@@ -275,28 +301,15 @@ def compute_roll_delta(
         return 0.0
 
     elapsed = t - phase_start_time
-    desired = desired_support_ratio(phase_id, elapsed, cfg)
-    ratio_error = max(0.0, desired - load_shift_metrics.support_ratio)
-    com_error = max(0.0, cfg["load_shift_com_ratio"] - load_shift_metrics.com_shift_ratio)
-    roll_feedback = cfg["load_shift_roll_delta"] * min(
-        1.0,
-        8.0 * (0.7 * ratio_error / max(desired, 1e-6)
-                + 0.3 * com_error / max(cfg["load_shift_com_ratio"], 1e-6)),
-    )
-    slip_scale = max(0.0, 1.0 - load_shift_metrics.swing_slip / max(SLIP_THRESH, 1e-6))
-    roll_delta = roll_feedback * slip_scale
 
     if phase_id == PhaseId.LOAD_SHIFT:
         progress = smoothstep((t - phase_start_time) / max(cfg["load_shift_time"], 1e-6))
-        roll_delta = min(progress * cfg["load_shift_roll_delta"], roll_delta)
+        roll_delta = progress * cfg["load_shift_roll_delta"]
     elif phase_id == PhaseId.PRE_LIFTOFF:
-        elapsed = t - phase_start_time
-        time_progress = min(1.0, elapsed / max(cfg["pre_liftoff_time"], 1e-6))
-        swing_force_error = max(0.0, load_shift_metrics.swing_force - cfg["pre_liftoff_swing_force_max"])
-        roll_delta += cfg["pre_liftoff_extra_roll_delta"] * min(
-            1.0, swing_force_error / max(cfg["pre_liftoff_swing_force_max"], 1e-6)
-        )
-        roll_delta *= min(1.0, time_progress)
+        progress = min(1.0, elapsed / max(cfg["pre_liftoff_time"], 1e-6))
+        roll_delta = cfg["load_shift_roll_delta"] + progress * cfg["pre_liftoff_extra_roll_delta"]
+    else:
+        roll_delta = cfg["load_shift_roll_delta"] + cfg["pre_liftoff_extra_roll_delta"]
 
     return roll_delta
 
@@ -315,25 +328,38 @@ def desired_support_ratio(phase, elapsed, cfg):
 
 
 def compute_c_ref(phase, elapsed, phase_entry_com_xy, nominal_c_ref,
-                  stance_midpoint, support_direction, standing_com_z, cfg):
+                  stance_midpoint, support_direction, standing_com_z, cfg,
+                  lipm_traj=None, lipm_elapsed=None):
     c_ref = nominal_c_ref.copy()
+    c_dot_ref = np.zeros(3)
+    c_ddot_ref = np.zeros(3)
+
     if phase <= PhaseId.DOUBLE_SUPPORT_HOLD:
         pass
     elif phase in (PhaseId.LOAD_SHIFT, PhaseId.PRE_LIFTOFF):
-        if phase == PhaseId.LOAD_SHIFT:
-            t_total = max(cfg["load_shift_time"], 1e-6)
+        if lipm_traj is not None and lipm_elapsed is not None:
+            t_eval = min(lipm_elapsed, lipm_traj["t_total"])
+            c_ref[0] = np.interp(t_eval, lipm_traj["t"], lipm_traj["x"])
+            c_ref[1] = np.interp(t_eval, lipm_traj["t"], lipm_traj["y"])
+            c_dot_ref[0] = np.interp(t_eval, lipm_traj["t"], lipm_traj["vx"])
+            c_dot_ref[1] = np.interp(t_eval, lipm_traj["t"], lipm_traj["vy"])
+            c_ddot_ref[0] = np.interp(t_eval, lipm_traj["t"], lipm_traj["ax"])
+            c_ddot_ref[1] = np.interp(t_eval, lipm_traj["t"], lipm_traj["ay"])
         else:
-            t_total = max(cfg["pre_liftoff_time"], 1e-6)
-        progress = smoothstep(elapsed / t_total)
-        desired = desired_support_ratio(phase, elapsed, cfg)
-        target_shift_ratio = 2.0 * max(0.0, desired - 0.5)
-        target_xy = stance_midpoint + target_shift_ratio * support_direction
-        c_ref[:2] = (1.0 - progress) * phase_entry_com_xy + progress * target_xy
+            if phase == PhaseId.LOAD_SHIFT:
+                t_total = max(cfg["load_shift_time"], 1e-6)
+            else:
+                t_total = max(cfg["pre_liftoff_time"], 1e-6)
+            progress = smoothstep(elapsed / t_total)
+            desired = desired_support_ratio(phase, elapsed, cfg)
+            target_shift_ratio = 2.0 * max(0.0, desired - 0.5)
+            target_xy = stance_midpoint + target_shift_ratio * support_direction
+            c_ref[:2] = (1.0 - progress) * phase_entry_com_xy + progress * target_xy
     else:
         c_ref[:2] = phase_entry_com_xy
     if standing_com_z is not None:
         c_ref[2] = standing_com_z
-    return c_ref
+    return c_ref, c_dot_ref, c_ddot_ref
 
 
 def print_results(log: SimLog, robot: RobotModel, initial_foot_pos: dict):
@@ -383,8 +409,8 @@ def print_results(log: SimLog, robot: RobotModel, initial_foot_pos: dict):
 def compute_ds_applied_tau(
     step, wbc_period, last_ds_wbc_tau, foot_contacts,
     support_leg_link, swing_foot_link, robot,
-    support_leg_corner_locals, swing_leg_corner_locals,
-    q, v, C_safe, wbc_ds_4, wbc_ds_8,
+    support_foot_center_local, swing_foot_center_local,
+    q, v, C_safe, wbc_ds,
     c_ref, c, c_dot_ref, c_dot, c_ddot_ref, L,
     phase, elapsed, cfg, com_shift_ratio,
     tau_min_limits, tau_max_limits, safe_tau,
@@ -405,12 +431,9 @@ def compute_ds_applied_tau(
         total_force = -GRAVITY[2] * robot.total_mass
         support_force = total_force * 0.5
         swing_force = total_force * 0.5
-    swing_force_thresh = 80.0
-    include_swing = swing_force >= swing_force_thresh
-    active_locals = support_leg_corner_locals + (swing_leg_corner_locals if include_swing else [])
-    active_links = [support_leg_link] * len(support_leg_corner_locals) + ([swing_foot_link] * len(swing_leg_corner_locals) if include_swing else [])
-    n_contacts = len(active_locals)
-    wbc_ds = wbc_ds_4 if n_contacts <= 4 else wbc_ds_8
+
+    active_locals = [support_foot_center_local, swing_foot_center_local]
+    active_links = [support_leg_link, swing_foot_link]
 
     M = robot.compute_mass_matrix(q)
     Ci = C_safe
@@ -437,14 +460,10 @@ def compute_ds_applied_tau(
         target_ratio = max(physical_target, desired_push)
         target_ratio = min(target_ratio, cfg.get("ds_force_ratio_cap", 0.95))
 
-    f_ref = np.zeros(3 * n_contacts)
     total_fz = max(-GRAVITY[2] * robot.total_mass, 1e-6)
-    n_support = len(support_leg_corner_locals)
-    n_swing_active = len(swing_leg_corner_locals) if include_swing else 0
-    for i in range(n_support):
-        f_ref[3 * i + 2] = target_ratio * total_fz / n_support
-    for i in range(n_swing_active):
-        f_ref[3 * (n_support + i) + 2] = (1.0 - target_ratio) * total_fz / n_swing_active
+    f_ref = np.zeros(6)
+    f_ref[2] = target_ratio * total_fz
+    f_ref[5] = (1.0 - target_ratio) * total_fz
 
     wbc_result = wbc_ds.solve(
         M, Ci, J_c, Jc_dot,
@@ -452,6 +471,7 @@ def compute_ds_applied_tau(
         c_ddot_des, L_dot_des,
         f_ref, v,
         tau_min_limits, tau_max_limits,
+        slip_weight=50000.0,
     )
     if wbc_result is not None:
         last_ds_wbc_tau = wbc_result["tau"]
@@ -631,14 +651,15 @@ def main() -> None:
 
     support_leg_corner_locals = resolve_corner_local_positions(robot, support_leg_link)
     swing_leg_corner_locals = resolve_corner_local_positions(robot, swing_foot_link)
+    support_foot_center_local = np.mean(support_leg_corner_locals, axis=0)
+    swing_foot_center_local = np.mean(swing_leg_corner_locals, axis=0)
     support_leg_init_metrics = robot.get_contact_metrics(support_leg_link)
     support_leg_init_contact = support_leg_init_metrics["position"].copy()
 
     # Single-support MPC and WBC
     mpc = CentroidalMPC()
     wbc_ss = WholeBodyController(robot.nv, num_contacts=4, contact_dim=3)
-    wbc_ds_4 = WholeBodyController(robot.nv, num_contacts=4, contact_dim=3)
-    wbc_ds_8 = WholeBodyController(robot.nv, num_contacts=8, contact_dim=3)
+    wbc_ds_2 = WholeBodyController(robot.nv, num_contacts=2, contact_dim=3)
     wbc_period = max(1, round(1.0 / (WBC_FREQ * DT_SIM)))
     last_ds_wbc_tau = None
     x_ref = np.zeros(NX)
@@ -670,6 +691,8 @@ def main() -> None:
     c_ref = nominal_c_ref.copy()
     standing_com_z = measured_com_z
     phase_entry_com_xy = nominal_c_ref[:2].copy()
+    lipm_traj = None
+    shift_start_time = 0.0
 
     print(f"\n===== Phase Experiment (duration={cfg['sim_duration']:.1f}s) =====")
     print(f"Support: {support_leg}, Swing: {swing_leg}")
@@ -740,6 +763,7 @@ def main() -> None:
                 "ratio_ok": ratio_met or ratio_fallback,
                 "speed_ok": load_shift_metrics.com_speed <= cfg["com_vel_ready_thresh"],
                 "force_ok": load_shift_metrics.swing_force < cfg["pre_liftoff_swing_force_max"],
+                "com_over_support": load_shift_metrics.com_shift_ratio >= 0.02,
             }
             if pl_gate.check(all(checks.values()), t, 0.10):
                 next_phase = PhaseId.SINGLE_SUPPORT
@@ -747,20 +771,42 @@ def main() -> None:
         if next_phase is not None:
             phase = next_phase
             phase_start_time = t
+            if phase == PhaseId.LOAD_SHIFT:
+                shift_start_time = t
+                omega = np.sqrt(9.81 / max(standing_com_z, 0.01))
+                T_shift = cfg["load_shift_time"] + cfg["pre_liftoff_time"]
+                com_xy_0 = c[:2].copy()
+                com_xy_target = stance_midpoint + 0.03 * support_direction
+                ts_x, xs_x, vs_x, as_x = plan_lipm_trajectory(
+                    com_xy_0[0], com_xy_target[0], T_shift, omega, DT_SIM,
+                )
+                ts_y, xs_y, vs_y, as_y = plan_lipm_trajectory(
+                    com_xy_0[1], com_xy_target[1], T_shift, omega, DT_SIM,
+                )
+                lipm_traj = {
+                    "t": ts_x, "t_total": T_shift,
+                    "x": xs_x, "vx": vs_x, "ax": as_x,
+                    "y": xs_y, "vy": vs_y, "ay": as_y,
+                }
+            elif phase not in (PhaseId.LOAD_SHIFT, PhaseId.PRE_LIFTOFF):
+                lipm_traj = None
             if next_phase == PhaseId.SINGLE_SUPPORT:
-                phase_entry_com_xy = stance_midpoint + 0.95 * support_direction
+                phase_entry_com_xy = stance_midpoint + 0.10 * support_direction
             else:
                 phase_entry_com_xy = c[:2].copy()
             standing_com_z = float(c[2])
             print(f"[PHASE] t={t:.3f}s -> {PhaseId(phase).name}")
 
         # --- Compute c_ref
-        c_dot_ref = np.zeros(3)
-        c_ddot_ref = np.zeros(3)
+        if lipm_traj is not None:
+            lipm_elapsed = t - shift_start_time
+        else:
+            lipm_elapsed = None
 
-        c_ref = compute_c_ref(
+        c_ref, c_dot_ref, c_ddot_ref = compute_c_ref(
             phase, elapsed, phase_entry_com_xy, nominal_c_ref,
             stance_midpoint, support_direction, standing_com_z, cfg,
+            lipm_traj=lipm_traj, lipm_elapsed=lipm_elapsed,
         )
 
         # --- Compute safe_tau (PD posture + C_bias) ---
@@ -781,8 +827,8 @@ def main() -> None:
             applied_tau, last_ds_wbc_tau = compute_ds_applied_tau(
                 step, wbc_period, last_ds_wbc_tau, foot_contacts,
                 support_leg_link, swing_foot_link, robot,
-                support_leg_corner_locals, swing_leg_corner_locals,
-                q, v, C_safe, wbc_ds_4, wbc_ds_8,
+                support_foot_center_local, swing_foot_center_local,
+                q, v, C_safe, wbc_ds_2,
                 c_ref, c, c_dot_ref, c_dot, c_ddot_ref, state["L"],
                 phase, elapsed, cfg,
                 load_shift_metrics.com_shift_ratio,

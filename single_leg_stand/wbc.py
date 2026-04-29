@@ -167,7 +167,8 @@ class WholeBodyController:
               tau_min: np.ndarray, tau_max: np.ndarray,
               force_task_matrix: Optional[np.ndarray] = None,
               force_task_ref: Optional[np.ndarray] = None,
-              force_task_weight: Optional[np.ndarray] = None) -> Optional[dict]:
+              force_task_weight: Optional[np.ndarray] = None,
+              slip_weight: float = 5000.0) -> Optional[dict]:
         nv, nf, n_dof = self.nv, self.nf, self.n_dof
         nz = self.nz
         cd = self.contact_dim
@@ -179,11 +180,15 @@ class WholeBodyController:
 
         W4_mat = W4 * np.eye(nv)
         P_vv = J_com.T @ W1 @ J_com + J_L.T @ W2 @ J_L + W4_mat
+        # Soft slip penalty: 0.5 * ||J_c * v_dot + Jc_dot * v||^2
+        W_slip = slip_weight * np.eye(J_c_lin.shape[0])
+        P_vv += J_c_lin.T @ W_slip @ J_c_lin
         W3_mat = self._force_weight_matrix()
         P_ff = W3_mat.copy()
         P = sparse.block_diag([P_vv, P_ff], format="csc")
 
         q_v = -(J_com.T @ W1 @ c_ddot_des + J_L.T @ W2 @ L_dot_des)
+        q_v += J_c_lin.T @ W_slip @ (Jc_dot_lin @ v)
         q_f = -W3_mat @ f_ref
         if force_task_matrix is not None:
             if force_task_ref is None or force_task_weight is None:
@@ -217,9 +222,10 @@ class WholeBodyController:
 
         A_dok = self._A.todok()
 
+        # Clear old slip constraint rows (these are now soft penalties)
         for i in range(n_slip):
             for j in range(nv):
-                A_dok[i, j] = J_c_lin[i, j]
+                A_dok[i, j] = 0.0
 
         row_base = n_slip + n_fcon
         JcT = J_c_lin.T
@@ -234,9 +240,9 @@ class WholeBodyController:
         l = self._l.copy()
         u = self._u.copy()
 
-        slip_bias = -(Jc_dot_lin @ v)
-        l[:n_slip] = slip_bias
-        u[:n_slip] = slip_bias
+        # Slip constraints are now soft — set bounds open
+        l[:n_slip] = -np.inf
+        u[:n_slip] = np.inf
 
         SC = C[6:]
         l[row_base : row_base + n_dof] = tau_min - SC
