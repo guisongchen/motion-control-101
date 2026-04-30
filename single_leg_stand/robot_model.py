@@ -62,6 +62,10 @@ class RobotModel:
         for geom_id in range(self.model.ngeom):
             self.model.geom_friction[geom_id, 0] = max(self.model.geom_friction[geom_id, 0], 1.5)
 
+        # Increase solver accuracy for better contact resolution
+        self.model.opt.iterations = 200
+        self.model.opt.ls_iterations = 100
+
         base_position = np.asarray(config.base_initial_pos, dtype=float)
         base_orientation = np.asarray(config.base_initial_orn, dtype=float)
 
