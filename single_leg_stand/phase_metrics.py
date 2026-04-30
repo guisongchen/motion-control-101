@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from config import MIN_SUPPORT_FORCE, SLIP_THRESH
+from config import MIN_SUPPORT_FORCE
 from phase_core import get_contacts
 
 

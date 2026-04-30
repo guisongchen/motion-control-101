@@ -18,7 +18,8 @@ from config import (
     GRAVITY,
     MIN_SUPPORT_FORCE,
     RMSE_THRESH,
-    SLIP_THRESH,
+    SLIP_NET_THRESH,
+    SLIP_PEAK_THRESH,
     NX,
     NU,
     WBC_FREQ,
@@ -366,16 +367,26 @@ def print_results(log: SimLog, robot: RobotModel, initial_foot_pos: dict):
     print(f"\n{'='*60}")
     print("===== RESULTS =====")
     rmse = compute_rmse(log.com, log.com_ref)
+    com_arr = np.stack(log.com)
+    com_ref_arr = np.stack(log.com_ref)
+    max_dev = float(np.max(np.linalg.norm(com_arr - com_ref_arr, axis=1)))
     print(f"CoM RMSE: {rmse:.4f} m (target < {RMSE_THRESH} m)")
+    print(f"CoM max deviation: {max_dev:.4f} m")
     max_slip = 0.0
-    final_foot_pos = {
-        link: robot.get_contact_metrics(link)["position"].copy()
-        for link in log.foot_links
-    }
+    net_slip = 0.0
     for link in log.foot_links:
-        slip = np.linalg.norm(final_foot_pos[link][:2] - initial_foot_pos[link][:2])
-        max_slip = max(max_slip, slip)
-    print(f"Max foot slip: {max_slip*1000:.2f} mm (target < {SLIP_THRESH*1000:.1f} mm)")
+        slip_arr = np.array(log.foot_slip[link])
+        non_nan = slip_arr[~np.isnan(slip_arr)]
+        if len(non_nan) > 0:
+            max_slip = max(max_slip, float(np.max(non_nan)))
+        try:
+            final_pos = robot.get_contact_metrics(link)["position"]
+            net = np.linalg.norm(final_pos[:2] - initial_foot_pos[link][:2])
+            net_slip = max(net_slip, net)
+        except Exception:
+            pass
+    print(f"Max peak slip: {max_slip*1000:.2f} mm (target < {SLIP_PEAK_THRESH*1000:.1f} mm)")
+    print(f"Max net displacement: {net_slip*1000:.2f} mm (target < {SLIP_NET_THRESH*1000:.1f} mm)")
     for link in log.foot_links:
         forces = np.array(log.foot_force[link])
         avg_force = np.mean(forces) if len(forces) > 0 else 0.0
@@ -404,6 +415,25 @@ def print_results(log: SimLog, robot: RobotModel, initial_foot_pos: dict):
                 pl_ratios.append(log.support_ratio[i])
         if pl_ratios:
             print(f"  PRE_LIFTOFF max ratio: {max(pl_ratios):.3f}, mean: {np.mean(pl_ratios):.3f}")
+    if max_phase >= PhaseId.SINGLE_SUPPORT:
+        ss_indices = [i for i, p in enumerate(log.phase) if p == PhaseId.SINGLE_SUPPORT]
+        if ss_indices:
+            ss_duration = log.t[ss_indices[-1]] - log.t[ss_indices[0]]
+            ss_rmse = compute_rmse(
+                log.com[ss_indices[0]:ss_indices[-1]+1],
+                log.com_ref[ss_indices[0]:ss_indices[-1]+1],
+            )
+            ss_max_dev = float(np.max(np.linalg.norm(
+                com_arr[ss_indices] - com_ref_arr[ss_indices], axis=1
+            )))
+            print(f"  SINGLE_SUPPORT duration: {ss_duration:.2f}s")
+            print(f"  SINGLE_SUPPORT CoM RMSE: {ss_rmse:.4f} m, max deviation: {ss_max_dev:.4f} m")
+
+    passed = rmse < RMSE_THRESH and max_slip < SLIP_PEAK_THRESH and net_slip < SLIP_NET_THRESH
+    print(f"\nVerdict: {'PASS' if passed else 'FAIL'} "
+          f"(RMSE {'<' if rmse < RMSE_THRESH else '>='} {RMSE_THRESH}, "
+          f"peak slip {'<' if max_slip < SLIP_PEAK_THRESH else '>='} {SLIP_PEAK_THRESH*1000:.1f}mm, "
+          f"net slip {'<' if net_slip < SLIP_NET_THRESH else '>='} {SLIP_NET_THRESH*1000:.1f}mm)")
 
 
 def compute_ds_applied_tau(
@@ -734,7 +764,7 @@ def main() -> None:
                 "slip_ok": max(
                     np.linalg.norm(contacts[link]["position"][:2] - initial_foot_pos[link][:2])
                     for link in foot_links
-                ) <= SLIP_THRESH,
+                ) <= SLIP_NET_THRESH,
                 "com_vel_ok": float(np.linalg.norm(c_dot)) <= cfg["ds_max_com_vel"],
                 "momentum_ok": float(np.linalg.norm(state["L"])) <= cfg["ds_max_L_norm"],
                 "com_inside": is_com_inside_support_polygon(c, corners_xy, cfg["ds_com_margin"]),
@@ -882,7 +912,7 @@ def main() -> None:
 
     plot_diagnostics(
         log, robot.link_to_foot_name, support_leg_link, swing_foot_link,
-        rmse_thresh=RMSE_THRESH, slip_thresh=SLIP_THRESH,
+        rmse_thresh=RMSE_THRESH, slip_net_thresh=SLIP_NET_THRESH, slip_peak_thresh=SLIP_PEAK_THRESH,
         ds_min_force=cfg["ds_min_force"],
         load_shift_roll_delta=cfg["load_shift_roll_delta"],
         ds_max_L_norm=cfg["ds_max_L_norm"],

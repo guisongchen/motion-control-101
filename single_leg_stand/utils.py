@@ -162,7 +162,7 @@ def compute_pd_torque(
 
 def plot_diagnostics(
     log, link_to_foot_name, support_foot_link, swing_foot_link,
-    rmse_thresh=0.02, slip_thresh=0.005,
+    rmse_thresh=0.02, slip_net_thresh=0.005, slip_peak_thresh=0.010,
     ds_min_force=80.0, load_shift_roll_delta=0.07, ds_max_L_norm=0.5,
 ):
     """Multi-panel diagnostic plot with threshold reference lines."""
@@ -207,12 +207,14 @@ def plot_diagnostics(
     vlines(ax)
 
     ax = axes[2]
-    slip_thresh_mm = slip_thresh * 1000.0
+    slip_net_mm = slip_net_thresh * 1000.0
+    slip_peak_mm = slip_peak_thresh * 1000.0
     for link_id in log.foot_links:
         slip = np.array(log.foot_slip[link_id]) * 1000.0
         name = link_to_foot_name.get(link_id, f"link_{link_id}")
         ax.plot(time_arr, slip, label=name)
-    ax.axhline(slip_thresh_mm, color="red", linestyle="--", alpha=0.6, label=f"slip limit ({slip_thresh_mm:.1f} mm)")
+    ax.axhline(slip_net_mm, color="orange", linestyle="--", alpha=0.7, label=f"net limit ({slip_net_mm:.1f} mm)")
+    ax.axhline(slip_peak_mm, color="red", linestyle="--", alpha=0.7, label=f"peak limit ({slip_peak_mm:.1f} mm)")
     ax.set_ylabel("Foot slip [mm]")
     ax.legend(loc="upper right")
     ax.grid(True, alpha=0.3)

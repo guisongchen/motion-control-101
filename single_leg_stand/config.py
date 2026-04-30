@@ -22,7 +22,8 @@ MIN_SUPPORT_FORCE = 50.0
 # Phase machine thresholds
 # ---------------------------------------------------------------------------
 RMSE_THRESH = 0.02
-SLIP_THRESH = 0.005
+SLIP_NET_THRESH = 0.005
+SLIP_PEAK_THRESH = 0.010
 
 # ---------------------------------------------------------------------------
 # MPC parameters
