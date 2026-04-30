@@ -76,49 +76,48 @@ class PhaseId(IntEnum):
 # ---------------------------------------------------------------------------
 PHASE_CONFIG = {
     "init_settle_time": 0.20,
-    "ds_ready_time": 0.80,
+    "ds_ready_time": 0.60,
     "ds_min_force": 80.0,
-    "ds_max_com_vel": 0.08,
-    "ds_max_L_norm": 0.50,
+    "ds_max_com_vel": 0.12,
+    "ds_max_L_norm": 0.80,
     "ds_force_ratio_min": 0.30,
-    "ds_com_margin": 0.02,
-    "load_shift_time": 1.50,
-    "load_shift_target_ratio": 0.72,
-    "load_shift_ratio_min": 0.55,
+    "ds_com_margin": 0.03,
+    "load_shift_time": 2.00,
+    "load_shift_target_ratio": 0.80,
+    "load_shift_ratio_min": 0.50,
     "load_shift_com_ratio": 0.25,
-    "load_shift_roll_delta": 0.06,
+    "load_shift_roll_delta": 0.08,
     "load_shift_swing_force_min": 25.0,
-    "com_vel_ready_thresh": 0.35,
-    "pre_liftoff_time": 1.50,
-    "pre_liftoff_ratio_min": 0.65,
-    "pre_liftoff_com_ratio": 0.55,
-    "pre_liftoff_extra_roll_delta": 0.03,
+    "com_vel_ready_thresh": 0.50,
+    "pre_liftoff_time": 2.00,
+    "pre_liftoff_ratio_min": 0.55,
+    "pre_liftoff_com_ratio": 0.30,
+    "pre_liftoff_extra_roll_delta": 0.04,
     "pre_liftoff_swing_force_max": 150.0,
-    "single_support_entry_time": 0.60,
+    "single_support_entry_time": 0.30,
     "single_support_hold_force": 15.0,
-    "single_support_support_ratio": 0.90,
-    "single_support_com_ratio": 0.70,
-    "transition_blend_time": 0.15,
+    "single_support_support_ratio": 0.80,
+    "single_support_com_ratio": 0.50,
+    "transition_blend_time": 0.20,
     "single_support_max_tau_blend": 0.85,
-    "single_support_swing_ramp_time": 0.8,
-    "single_support_swing_progress_max": 1.0,
-    "swing_hip_pitch_target": 0.10,
-    "swing_knee_target": 1.05,
-    "swing_ankle_pitch_target": -0.55,
-    "ds_force_weight_xy": 100.0,
-    "ds_force_weight_z": 100.0,
-    "ds_load_dist_weight": 3000.0,
+    "single_support_swing_ramp_time": 1.2,
+    "single_support_swing_progress_max": 0.7,
+    "swing_hip_pitch_target": 0.20,
+    "swing_knee_target": 0.85,
+    "swing_ankle_pitch_target": -0.40,
+    "ds_force_weight_xy": 500.0,
+    "ds_force_weight_z": 500.0,
+    "ds_load_dist_weight": 8000.0,
     "ds_posture_blend": 0.50,
-    "ds_shift_posture_blend": 0.15,
-    "adaptive_ratio_span": 0.10,
-    "ds_force_ratio_cap": 0.85,
+    "ds_shift_posture_blend": 0.05,
+    "adaptive_ratio_span": 0.45,
+    "ds_force_ratio_cap": 0.92,
     "ds_force_target_margin": 0.05,
-    "ds_force_desired_factor": 0.0,
-    "posture_kp": 160.0,
-    "posture_kd": 28.0,
-    "lift_leg_kp": 120.0,
-    "lift_leg_kd": 8.0,
-    "sim_duration": 20.0,
+    "posture_kp": 220.0,
+    "posture_kd": 36.0,
+    "lift_leg_kp": 180.0,
+    "lift_leg_kd": 15.0,
+    "sim_duration": 25.0,
 }
 
 
@@ -501,7 +500,7 @@ def compute_ds_applied_tau(
         c_ddot_des, L_dot_des,
         f_ref, v,
         tau_min_limits, tau_max_limits,
-        slip_weight=50000.0,
+        slip_weight=100000.0,
     )
     if wbc_result is not None:
         last_ds_wbc_tau = wbc_result["tau"]
@@ -549,6 +548,7 @@ class SingleSupportController:
             if support_metrics_now["normal_force"] >= cfg["single_support_hold_force"]:
                 self.ss_established = True
                 self.ss_com_ref = c_ref.copy()
+                self.ss_com_ref[:2] = self.filtered_support_pos[:2]
                 self.ss_com_ref[2] = standing_com_z if standing_com_z is not None else c_ref[2]
                 self.filtered_cop_world = np.array(support_metrics_now["cop_position"], copy=True)
 
@@ -692,7 +692,7 @@ def main() -> None:
     mpc = CentroidalMPC()
     wbc_ss = WholeBodyController(robot.nv, num_contacts=4, contact_dim=3)
     wbc_ds_2 = WholeBodyController(robot.nv, num_contacts=2, contact_dim=3,
-                                    kp_c=150.0, kd_c=30.0)
+                                    kp_c=200.0, kd_c=40.0)
     wbc_period = max(1, round(1.0 / (WBC_FREQ * DT_SIM)))
     last_ds_wbc_tau = None
     x_ref = np.zeros(NX)
@@ -798,7 +798,10 @@ def main() -> None:
                 "ratio_ok": ratio_met or ratio_fallback,
                 "speed_ok": load_shift_metrics.com_speed <= cfg["com_vel_ready_thresh"],
                 "force_ok": load_shift_metrics.swing_force < cfg["pre_liftoff_swing_force_max"],
-                "com_over_support": load_shift_metrics.com_shift_ratio >= 0.02,
+                "com_over_support": (
+                    load_shift_metrics.com_shift_ratio >= 0.02
+                    or (elapsed >= cfg["pre_liftoff_time"] and load_shift_metrics.support_ratio >= 0.75)
+                ),
             }
             if pl_gate.check(all(checks.values()), t, 0.10):
                 next_phase = PhaseId.SINGLE_SUPPORT
@@ -811,7 +814,7 @@ def main() -> None:
                 omega = np.sqrt(9.81 / max(standing_com_z, 0.01))
                 T_shift = cfg["load_shift_time"] + cfg["pre_liftoff_time"]
                 com_xy_0 = c[:2].copy()
-                com_xy_target = stance_midpoint + 0.08 * support_offset
+                com_xy_target = stance_midpoint + 0.30 * support_offset
                 ts_x, xs_x, vs_x, as_x = plan_lipm_trajectory(
                     com_xy_0[0], com_xy_target[0], T_shift, omega, DT_SIM,
                 )

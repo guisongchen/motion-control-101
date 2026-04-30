@@ -140,6 +140,9 @@ class WholeBodyController:
             max_iter=4000,
         )
 
+    MAX_ACCEL = 8.0
+    MAX_MOMENTUM_RATE = 50.0
+
     def compute_desired_acceleration(self,
                                      c_ref: np.ndarray, c_est: np.ndarray,
                                      c_dot_ref: np.ndarray, c_dot_est: np.ndarray,
@@ -147,14 +150,16 @@ class WholeBodyController:
         c_ddot_des = (c_ddot_ref
                       + self.kp_c * (c_ref - c_est)
                       + self.kd_c * (c_dot_ref - c_dot_est))
+        c_ddot_des = np.clip(c_ddot_des, -self.MAX_ACCEL, self.MAX_ACCEL)
         return c_ddot_des
 
     def compute_desired_momentum_rate(self,
-                                      L_ref: np.ndarray, L_est: np.ndarray,
-                                      L_dot_ref: np.ndarray, L_dot_est: np.ndarray) -> np.ndarray:
+                                       L_ref: np.ndarray, L_est: np.ndarray,
+                                       L_dot_ref: np.ndarray, L_dot_est: np.ndarray) -> np.ndarray:
         L_dot_des = (L_dot_ref
                      + self.kp_L * (L_ref - L_est)
                      + self.kd_L * (L_dot_ref - L_dot_est))
+        L_dot_des = np.clip(L_dot_des, -self.MAX_MOMENTUM_RATE, self.MAX_MOMENTUM_RATE)
         return L_dot_des
 
     def solve(self,
