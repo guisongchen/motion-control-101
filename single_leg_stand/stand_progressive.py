@@ -811,7 +811,7 @@ def main() -> None:
                 omega = np.sqrt(9.81 / max(standing_com_z, 0.01))
                 T_shift = cfg["load_shift_time"] + cfg["pre_liftoff_time"]
                 com_xy_0 = c[:2].copy()
-                com_xy_target = stance_midpoint + 0.03 * support_unit_vec
+                com_xy_target = stance_midpoint + 0.03 * support_offset
                 ts_x, xs_x, vs_x, as_x = plan_lipm_trajectory(
                     com_xy_0[0], com_xy_target[0], T_shift, omega, DT_SIM,
                 )
@@ -826,7 +826,7 @@ def main() -> None:
             elif phase not in (PhaseId.LOAD_SHIFT, PhaseId.PRE_LIFTOFF):
                 lipm_traj = None
             if next_phase == PhaseId.SINGLE_SUPPORT:
-                phase_entry_com_xy = stance_midpoint + 0.10 * support_unit_vec
+                phase_entry_com_xy = stance_midpoint + 0.10 * support_offset
             else:
                 phase_entry_com_xy = c[:2].copy()
             standing_com_z = float(c[2])
