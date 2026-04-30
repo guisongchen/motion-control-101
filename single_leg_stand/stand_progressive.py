@@ -329,7 +329,8 @@ def desired_support_ratio(phase, elapsed, cfg):
 
 
 def compute_c_ref(phase, elapsed, phase_entry_com_xy, nominal_c_ref,
-                  stance_midpoint, support_direction, standing_com_z, cfg,
+                  stance_midpoint, support_unit_vec, support_half_stance,
+                  standing_com_z, cfg,
                   lipm_traj=None, lipm_elapsed=None):
     c_ref = nominal_c_ref.copy()
     c_dot_ref = np.zeros(3)
@@ -353,8 +354,8 @@ def compute_c_ref(phase, elapsed, phase_entry_com_xy, nominal_c_ref,
                 t_total = max(cfg["pre_liftoff_time"], 1e-6)
             progress = smoothstep(elapsed / t_total)
             desired = desired_support_ratio(phase, elapsed, cfg)
-            target_shift_ratio = 2.0 * max(0.0, desired - 0.5)
-            target_xy = stance_midpoint + target_shift_ratio * support_direction
+            target_shift_fraction = 2.0 * max(0.0, desired - 0.5)
+            target_xy = stance_midpoint + target_shift_fraction * support_half_stance * support_unit_vec
             c_ref[:2] = (1.0 - progress) * phase_entry_com_xy + progress * target_xy
     else:
         c_ref[:2] = phase_entry_com_xy
@@ -677,7 +678,9 @@ def main() -> None:
     support_xy = initial_foot_pos[support_leg_link][:2]
     swing_xy = initial_foot_pos[swing_foot_link][:2]
     stance_midpoint = 0.5 * (support_xy + swing_xy)
-    support_direction = support_xy - stance_midpoint
+    support_offset = support_xy - stance_midpoint
+    support_half_stance = float(np.linalg.norm(support_offset))
+    support_unit_vec = support_offset / max(support_half_stance, 1e-6)
 
     support_leg_corner_locals = resolve_corner_local_positions(robot, support_leg_link)
     swing_leg_corner_locals = resolve_corner_local_positions(robot, swing_foot_link)
@@ -808,7 +811,7 @@ def main() -> None:
                 omega = np.sqrt(9.81 / max(standing_com_z, 0.01))
                 T_shift = cfg["load_shift_time"] + cfg["pre_liftoff_time"]
                 com_xy_0 = c[:2].copy()
-                com_xy_target = stance_midpoint + 0.03 * support_direction
+                com_xy_target = stance_midpoint + 0.03 * support_unit_vec
                 ts_x, xs_x, vs_x, as_x = plan_lipm_trajectory(
                     com_xy_0[0], com_xy_target[0], T_shift, omega, DT_SIM,
                 )
@@ -823,7 +826,7 @@ def main() -> None:
             elif phase not in (PhaseId.LOAD_SHIFT, PhaseId.PRE_LIFTOFF):
                 lipm_traj = None
             if next_phase == PhaseId.SINGLE_SUPPORT:
-                phase_entry_com_xy = stance_midpoint + 0.10 * support_direction
+                phase_entry_com_xy = stance_midpoint + 0.10 * support_unit_vec
             else:
                 phase_entry_com_xy = c[:2].copy()
             standing_com_z = float(c[2])
@@ -837,7 +840,8 @@ def main() -> None:
 
         c_ref, c_dot_ref, c_ddot_ref = compute_c_ref(
             phase, elapsed, phase_entry_com_xy, nominal_c_ref,
-            stance_midpoint, support_direction, standing_com_z, cfg,
+            stance_midpoint, support_unit_vec, support_half_stance,
+            standing_com_z, cfg,
             lipm_traj=lipm_traj, lipm_elapsed=lipm_elapsed,
         )
 
