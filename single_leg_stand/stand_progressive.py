@@ -638,20 +638,18 @@ def main() -> None:
     cfg = PHASE_CONFIG
 
     robot = RobotModel(g1_config)
+    initial_dof_angles = robot.set_standing_angles(g1_config.standing_joint_angles)
 
     swing_leg = g1_config.lift_leg
     support_leg = "right" if swing_leg == "left" else "left"
     support_leg_link = robot.foot_name_to_link[g1_config.support_foot_name]
     swing_foot_link = robot.foot_name_to_link[g1_config.swing_foot_name]
     foot_links = robot.foot_link_ids
-    estimator = StateEstimator(robot)
-
-    initial_dof_angles = robot.set_standing_angles(g1_config.standing_joint_angles)
-    joint_name_to_dof_idx = robot.dof_joint_name_to_index
-    measured_com_z = float(robot.compute_com_position()[2])
 
     tau_max_limits = robot.tau_limits.copy()
     tau_min_limits = -tau_max_limits
+
+    joint_name_to_dof_idx = robot.dof_joint_name_to_index
     swing_leg_dof_indices = [
         joint_name_to_dof_idx[name]
         for name in g1_config.leg_joint_names[swing_leg]
@@ -668,6 +666,8 @@ def main() -> None:
         link: np.array(robot.get_contact_metrics(link)["position"], copy=True)
         for link in foot_links
     }
+
+    measured_com_z = float(robot.compute_com_position()[2])
     nominal_c_ref = np.zeros(3)
     nominal_c_ref[2] = measured_com_z
     nominal_c_ref[:2] = np.mean(
@@ -723,6 +723,8 @@ def main() -> None:
     phase_entry_com_xy = nominal_c_ref[:2].copy()
     lipm_traj = None
     shift_start_time = 0.0
+
+    estimator = StateEstimator(robot)
 
     print(f"\n===== Phase Experiment (duration={cfg['sim_duration']:.1f}s) =====")
     print(f"Support: {support_leg}, Swing: {swing_leg}")
