@@ -90,7 +90,7 @@ PHASE_CONFIG = {
     "load_shift_swing_force_min": 25.0,
     "com_vel_ready_thresh": 0.35,
     "pre_liftoff_time": 1.50,
-    "pre_liftoff_ratio_min": 0.55,
+    "pre_liftoff_ratio_min": 0.65,
     "pre_liftoff_com_ratio": 0.55,
     "pre_liftoff_extra_roll_delta": 0.03,
     "pre_liftoff_swing_force_max": 150.0,
@@ -109,7 +109,7 @@ PHASE_CONFIG = {
     "ds_force_weight_z": 100.0,
     "ds_load_dist_weight": 3000.0,
     "ds_posture_blend": 0.50,
-    "ds_shift_posture_blend": 0.60,
+    "ds_shift_posture_blend": 0.15,
     "adaptive_ratio_span": 0.10,
     "ds_force_ratio_cap": 0.85,
     "ds_force_target_margin": 0.05,
@@ -213,16 +213,16 @@ def resolve_corner_local_positions(robot: RobotModel, link: int) -> list[np.ndar
 
 def apply_roll_shift_offset(targets, joint_name_to_dof_idx, support_leg, delta, nv_base):
     _ = nv_base
-    support_sign = 1.0 if support_leg == "right" else -1.0
     for leg in ("left", "right"):
+        leg_sign = 1.0 if leg == support_leg else -1.0
         name = f"{leg}_hip_roll_joint"
         if name in joint_name_to_dof_idx:
             idx = joint_name_to_dof_idx[name]
-            targets[idx] += support_sign * delta
+            targets[idx] += leg_sign * delta
         name = f"{leg}_ankle_roll_joint"
         if name in joint_name_to_dof_idx:
             idx = joint_name_to_dof_idx[name]
-            targets[idx] += -support_sign * delta
+            targets[idx] += -leg_sign * delta
 
 
 def compute_swing_progress(elapsed, phase, cfg):
@@ -484,11 +484,8 @@ def compute_ds_applied_tau(
     if phase == PhaseId.DOUBLE_SUPPORT_HOLD:
         target_ratio = 0.5
     else:
-        com_shift_clipped = max(0.0, com_shift_ratio)
-        physical_target = 0.5 + 0.5 * com_shift_clipped + cfg.get("ds_force_target_margin", 0.05)
         desired = desired_support_ratio(phase, elapsed, cfg)
-        desired_push = 0.5 + cfg.get("ds_force_desired_factor", 0.3) * (desired - 0.5)
-        target_ratio = max(physical_target, desired_push)
+        target_ratio = 0.5 + 0.5 * desired + cfg.get("ds_force_target_margin", 0.05)
         target_ratio = min(target_ratio, cfg.get("ds_force_ratio_cap", 0.95))
 
     total_fz = max(-GRAVITY[2] * robot.total_mass, 1e-6)
@@ -692,7 +689,8 @@ def main() -> None:
     # Single-support MPC and WBC
     mpc = CentroidalMPC()
     wbc_ss = WholeBodyController(robot.nv, num_contacts=4, contact_dim=3)
-    wbc_ds_2 = WholeBodyController(robot.nv, num_contacts=2, contact_dim=3)
+    wbc_ds_2 = WholeBodyController(robot.nv, num_contacts=2, contact_dim=3,
+                                    kp_c=150.0, kd_c=30.0)
     wbc_period = max(1, round(1.0 / (WBC_FREQ * DT_SIM)))
     last_ds_wbc_tau = None
     x_ref = np.zeros(NX)
@@ -811,7 +809,7 @@ def main() -> None:
                 omega = np.sqrt(9.81 / max(standing_com_z, 0.01))
                 T_shift = cfg["load_shift_time"] + cfg["pre_liftoff_time"]
                 com_xy_0 = c[:2].copy()
-                com_xy_target = stance_midpoint + 0.03 * support_offset
+                com_xy_target = stance_midpoint + 0.08 * support_offset
                 ts_x, xs_x, vs_x, as_x = plan_lipm_trajectory(
                     com_xy_0[0], com_xy_target[0], T_shift, omega, DT_SIM,
                 )
@@ -825,10 +823,7 @@ def main() -> None:
                 }
             elif phase not in (PhaseId.LOAD_SHIFT, PhaseId.PRE_LIFTOFF):
                 lipm_traj = None
-            if next_phase == PhaseId.SINGLE_SUPPORT:
-                phase_entry_com_xy = stance_midpoint + 0.10 * support_offset
-            else:
-                phase_entry_com_xy = c[:2].copy()
+            phase_entry_com_xy = c[:2].copy()
             standing_com_z = float(c[2])
             print(f"[PHASE] t={t:.3f}s -> {PhaseId(phase).name}")
 
