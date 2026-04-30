@@ -430,9 +430,11 @@ def print_results(log: SimLog, robot: RobotModel, initial_foot_pos: dict):
             print(f"  SINGLE_SUPPORT duration: {ss_duration:.2f}s")
             print(f"  SINGLE_SUPPORT CoM RMSE: {ss_rmse:.4f} m, max deviation: {ss_max_dev:.4f} m")
 
-    passed = rmse < RMSE_THRESH and max_slip < SLIP_PEAK_THRESH and net_slip < SLIP_NET_THRESH
+    reached_ss = max_phase >= PhaseId.SINGLE_SUPPORT
+    passed = reached_ss and rmse < RMSE_THRESH and max_slip < SLIP_PEAK_THRESH and net_slip < SLIP_NET_THRESH
     print(f"\nVerdict: {'PASS' if passed else 'FAIL'} "
-          f"(RMSE {'<' if rmse < RMSE_THRESH else '>='} {RMSE_THRESH}, "
+          f"(reached SINGLE_SUPPORT: {'yes' if reached_ss else 'no'}, "
+          f"RMSE {'<' if rmse < RMSE_THRESH else '>='} {RMSE_THRESH}, "
           f"peak slip {'<' if max_slip < SLIP_PEAK_THRESH else '>='} {SLIP_PEAK_THRESH*1000:.1f}mm, "
           f"net slip {'<' if net_slip < SLIP_NET_THRESH else '>='} {SLIP_NET_THRESH*1000:.1f}mm)")
 
